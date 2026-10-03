@@ -1,6 +1,8 @@
 import { Badge } from "./components/Badge";
 import { Stat, SiteDetail } from "./components/SiteDetail";
 import { ImportDialog, PhpDialog } from "./components/RuntimeDialogs";
+import { Setup } from "./components/Setup";
+import type { InstallProgress } from "./contracts";
 import { Logs } from "./components/Logs";
 import { useCallback, useEffect, useState } from "react";
 import { bridge, desktop } from "./bridge";
@@ -10,6 +12,14 @@ type Page = "Sites" | "Runtimes" | "Databases" | "Logs" | "Settings";
 const pages: Page[] = ["Sites", "Runtimes", "Databases", "Logs", "Settings"];
 const kinds: RuntimeKind[] = ["php", "mysql", "caddy"];
 export default function App() {
+  const [logSite, setLogSite] = useState<
+    Snapshot["sites"][number] | undefined
+  >();
+  const [setupDismissed, setSetupDismissed] = useState(false);
+  const [installing, setInstalling] = useState(false);
+  const [progress, setProgress] = useState<InstallProgress | null>(null);
+  const [catalogUrl, setCatalogUrl] = useState("");
+  const [catalogHash, setCatalogHash] = useState("");
   const [page, setPage] = useState<Page>("Sites");
   const [data, setData] = useState<Snapshot | null>(null);
   const [busy, setBusy] = useState(false);
@@ -35,7 +45,19 @@ export default function App() {
     const id = setInterval(() => void refresh(), 4000);
     return () => clearInterval(id);
   }, [refresh, busy]);
+  useEffect(() => {
+    if (!installing || !desktop) return;
+    const id = setInterval(() => {
+      void bridge
+        .progress()
+        .then(setProgress)
+        .catch(() => {});
+    }, 500);
+    return () => clearInterval(id);
+  }, [installing]);
   const act = async (action: Action) => {
+    setProgress(null);
+    setInstalling(action.type === "install");
     setBusy(true);
     setError("");
     setNotice("");
@@ -47,6 +69,7 @@ export default function App() {
       setError(String(e));
     } finally {
       setBusy(false);
+      setInstalling(false);
       void refresh();
     }
   };
@@ -69,6 +92,7 @@ export default function App() {
               className={page === p ? "nav active" : "nav"}
               onClick={() => {
                 setPage(p);
+                setLogSite(undefined);
                 setSelected(null);
               }}
             >
@@ -139,6 +163,13 @@ export default function App() {
               site data are not simulated.
             </div>
           )}
+          {busy && progress && (
+            <div className="alert" role="status">
+              {progress.runtime} · {progress.phase} ·{" "}
+              {progress.bytes.toLocaleString()} bytes{" "}
+              {progress.total ? "/ " + progress.total.toLocaleString() : ""}
+            </div>
+          )}
           {error && (
             <div className="alert error" role="alert">
               {error}
@@ -162,6 +193,10 @@ export default function App() {
                       data={data}
                       busy={busy}
                       act={act}
+                      logs={() => {
+                        setLogSite(site);
+                        setPage("Logs");
+                      }}
                       back={() => setSelected(null)}
                     />
                   ) : (
@@ -312,6 +347,7 @@ export default function App() {
                             ＋ Import Runtime
                           </button>
                         </div>
+                        <h3 className="panel-copy">Installed</h3>
                         {data.installed
                           .filter((r) => r.manifest.runtime === kind)
                           .map((r) => (
@@ -391,9 +427,11 @@ export default function App() {
                             x64 distribution.
                           </div>
                         )}
+                        <h3 className="panel-copy">Available</h3>
                         {data.available
                           .filter(
                             (m) =>
+                              m.platform === data.platform &&
                               m.runtime === kind &&
                               !data.installed.some(
                                 (r) => r.id === kind + ":" + m.version,
@@ -421,8 +459,9 @@ export default function App() {
                       </section>
                     ))}
                     <p className="footnote">
-                      Available versions come from config/runtime-catalog.json.
-                      No bundled version list. Node execution is planned.
+                      Available versions come from bundled, local, or
+                      integrity-verified remote catalog metadata. Node execution
+                      is planned.
                     </p>
                   </>
                 )}
@@ -430,13 +469,42 @@ export default function App() {
                   <>
                     <div className="alert">
                       MySQL binds to 127.0.0.1. New development instances
-                      initialize with root and an empty password; credentials
-                      and authentication management are not implemented yet.
+                      initialize with root and an empty password; project users
+                      receive database-specific grants with encrypted local
+                      credential references.
                     </div>
                     <section className="panel">
                       <div className="panel-header">
                         <h2>MySQL instances</h2>
                       </div>
+                      {data.installed
+                        .filter(
+                          (r) =>
+                            r.manifest.runtime === "mysql" &&
+                            !data.databases.some(
+                              (db) => db.runtime_id === r.id,
+                            ),
+                        )
+                        .map((r) => (
+                          <div className="runtime-row" key={r.id}>
+                            {r.id}
+                            <button
+                              disabled={busy}
+                              onClick={() =>
+                                void act({
+                                  type: "database",
+                                  runtime: {
+                                    kind: "mysql",
+                                    version: r.manifest.version,
+                                  },
+                                  operation: "initialize",
+                                })
+                              }
+                            >
+                              Initialize persistent instance
+                            </button>
+                          </div>
+                        ))}
                       {data.databases.length === 0 ? (
                         <div className="empty">
                           No instance initialized. Select an installed MySQL
@@ -450,6 +518,33 @@ export default function App() {
                               <small>{db.data_path}</small>
                             </div>
                             <span>127.0.0.1:{db.port ?? "unallocated"}</span>
+                            <div className="actions">
+                              {(
+                                [
+                                  "start",
+                                  "stop",
+                                  "restart",
+                                  "validate",
+                                ] as const
+                              ).map((operation) => (
+                                <button
+                                  key={operation}
+                                  disabled={busy}
+                                  onClick={() =>
+                                    void act({
+                                      type: "database",
+                                      runtime: {
+                                        kind: "mysql",
+                                        version: db.runtime_id.slice(6),
+                                      },
+                                      operation,
+                                    })
+                                  }
+                                >
+                                  {operation}
+                                </button>
+                              ))}
+                            </div>
                             <Badge
                               value={
                                 data.services.find(
@@ -470,9 +565,18 @@ export default function App() {
                     </p>
                   </>
                 )}
-                {page === "Logs" && <Logs />}
+                {page === "Logs" && <Logs site={logSite} />}
                 {page === "Settings" && (
                   <>
+                    <button
+                      disabled={busy}
+                      onClick={() => {
+                        setSetupDismissed(false);
+                        void act({ type: "reopen_setup" });
+                      }}
+                    >
+                      เปิด Setup wizard อีกครั้ง
+                    </button>
                     <section className="panel">
                       <div className="panel-header">
                         <h2>Workspace</h2>
@@ -502,15 +606,16 @@ export default function App() {
                         <div>
                           <strong>Managed .test domains</strong>
                           <p>
-                            Automatic hosts block. Initial Windows setup needs
-                            an elevated app session.
+                            Wildcard resolver สำหรับ *.test บน loopback และ
+                            Windows DNS policy เฉพาะ .test ใช้ helper แสดง UAC
+                            ครั้งเดียว
                           </p>
                         </div>
                         <button
                           disabled={busy}
                           onClick={() => void act({ type: "dns" })}
                         >
-                          Sync domains
+                          Setup wildcard DNS
                         </button>
                       </div>
                       <div className="settings-row">
@@ -529,6 +634,20 @@ export default function App() {
                         </button>
                       </div>
                     </section>
+                    <div className="actions">
+                      <button
+                        disabled={busy}
+                        onClick={() => void act({ type: "remove_dns" })}
+                      >
+                        Remove owned DNS policy
+                      </button>
+                      <button
+                        disabled={busy}
+                        onClick={() => void act({ type: "hosts_fallback" })}
+                      >
+                        ใช้ hosts fallback แบบ explicit
+                      </button>
+                    </div>
                     <section className="panel">
                       <div className="panel-header">
                         <h2>Runtime catalog</h2>
@@ -542,7 +661,34 @@ export default function App() {
                       <p className="panel-copy">
                         Edit <code>config/runtime-catalog.json</code> inside
                         DEVONE_HOME. Downloads require HTTPS, a SHA-256
-                        checksum, and safe relative binary paths.
+                        checksum, and safe relative binary paths. Last-good
+                        catalog is preserved on failure.
+                        <label>
+                          Remote catalog HTTPS URL
+                          <input
+                            value={catalogUrl}
+                            onChange={(e) => setCatalogUrl(e.target.value)}
+                          />
+                        </label>
+                        <label>
+                          Expected metadata SHA-256
+                          <input
+                            value={catalogHash}
+                            onChange={(e) => setCatalogHash(e.target.value)}
+                          />
+                        </label>
+                        <button
+                          disabled={busy || !catalogUrl || !catalogHash}
+                          onClick={() =>
+                            void act({
+                              type: "remote_catalog",
+                              url: catalogUrl,
+                              sha256: catalogHash,
+                            })
+                          }
+                        >
+                          Verify & refresh remote catalog
+                        </button>
                       </p>
                     </section>
                   </>
@@ -555,19 +701,33 @@ export default function App() {
           DEVONE LOCAL <span>PHP + MySQL · Phase 1 foundation</span>
         </footer>
       </main>
+      {data && !data.setup.completed && !setupDismissed && (
+        <Setup
+          data={data}
+          busy={busy}
+          error={error}
+          progress={progress}
+          act={act}
+          close={() => setSetupDismissed(true)}
+          importRuntime={setImportKind}
+        />
+      )}
       {importKind && data && (
         <ImportDialog
           kind={importKind}
           data={data}
           busy={busy}
+          error={error}
           close={() => setImportKind(null)}
           act={act}
         />
       )}
-      {php && (
+      {php && data && (
         <PhpDialog
           runtime={php}
+          data={data}
           busy={busy}
+          error={error}
           close={() => setPhp(null)}
           act={act}
         />

@@ -1,3 +1,4 @@
+pub mod watcher;
 use crate::{
     catalog::{self, RuntimeManifest},
     config::Home,
@@ -30,6 +31,10 @@ pub struct Snapshot {
     pub dns_ready: bool,
     pub ca_present: bool,
     pub active: bool,
+    pub binary_roles: BTreeMap<String, BTreeMap<String, String>>,
+    pub project_databases: Vec<crate::database::provision::Binding>,
+    pub setup: crate::setup::State,
+    pub php_settings: BTreeMap<String, crate::runtime::PhpSettings>,
 }
 #[derive(Clone, Copy)]
 pub struct Options {
@@ -42,6 +47,7 @@ pub struct Application {
     pub supervisor: Supervisor,
     pub issues: Vec<String>,
     pub active: bool,
+    _dns: Option<crate::dns::server::Resolver>,
     _lock: std::fs::File,
     options: Options,
     routed: BTreeMap<String, String>,
@@ -76,6 +82,7 @@ impl Application {
             supervisor: Supervisor::default(),
             issues: Vec::new(),
             active: false,
+            _dns: None,
             _lock: lock,
             options,
             routed: BTreeMap::new(),
@@ -83,6 +90,12 @@ impl Application {
         if let Err(e) = catalog::refresh(&app.store, &app.home.path("config/runtime-catalog.json"))
         {
             app.issues.push(e.to_string());
+        }
+        if options.system_setup {
+            match crate::dns::server::Resolver::start(53) {
+                Ok(server) => app._dns = Some(server),
+                Err(e) => app.issues.push(e.to_string()),
+            }
         }
         app.scan()?;
         if options.autostart
@@ -93,9 +106,24 @@ impl Application {
         }
         Ok(app)
     }
+    pub fn setup_dns(&mut self, remove: bool) -> Result<()> {
+        if !remove && self._dns.as_ref().is_none_or(|r| !r.healthy()) {
+            self._dns = None;
+            self._dns = Some(crate::dns::server::Resolver::start(53)?);
+        }
+        crate::platform::setup_wildcard(remove)?;
+        self.issues.retain(|i| {
+            !i.starts_with("DNS UDP ")
+                && !i.starts_with("DNS TCP ")
+                && !i.starts_with("Wildcard DNS setup required")
+        });
+        Ok(())
+    }
     pub fn scan(&mut self) -> Result<()> {
         let result = crate::projects::scan(&mut self.store, &self.home.www())?;
-        self.issues = result.issues;
+        self.issues.retain(|i| !i.starts_with("Discovery:"));
+        self.issues
+            .extend(result.issues.into_iter().map(|i| format!("Discovery: {i}")));
         let hosts = self
             .sites()?
             .into_iter()
@@ -104,6 +132,7 @@ impl Application {
             .collect::<Vec<_>>();
         if self.options.system_setup
             && let Err(e) = crate::dns::LocalDns.reconcile(&hosts)
+            && !self.issues.contains(&e.to_string())
         {
             self.issues.push(e.to_string());
         }
@@ -135,6 +164,7 @@ impl Application {
             })
         })?;
         let mut sites = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        let database_bindings = crate::database::provision::bindings(&self.store)?;
         for site in &mut sites {
             let mut stmt = self
                 .store
@@ -144,6 +174,15 @@ impl Application {
                 .query_map([&site.id], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<std::result::Result<BTreeMap<_, _>, _>>()?;
             for kind in [RuntimeType::Php, RuntimeType::Mysql] {
+                if kind == RuntimeType::Mysql
+                    && let Some(binding) = database_bindings.iter().find(|b| b.site_id == site.id)
+                {
+                    site.resolved.insert(
+                        "mysql".into(),
+                        binding.runtime_id.trim_start_matches("mysql:").to_string(),
+                    );
+                    continue;
+                }
                 let default = runtime::default_ref(&self.store, &kind)?;
                 if let Some(reference) = runtime::resolve(
                     default.as_ref().map(|r| r.version.as_str()),
@@ -164,6 +203,9 @@ impl Application {
                 crate::core::Error::Message("Site is missing or no longer present".into())
             })
     }
+    pub fn dns_owned(&self) -> bool {
+        self._dns.as_ref().is_some_and(|r| r.healthy())
+    }
     pub fn snapshot(&mut self) -> Result<Snapshot> {
         let services = self.supervisor.states(&self.store)?;
         let mut sites = self.sites()?;
@@ -171,11 +213,7 @@ impl Application {
             .iter()
             .any(|s| s.key.starts_with("caddy:") && s.healthy);
         let ca = crate::tls::CaddyTls.ca_path(&self.home).is_file();
-        let trusted: bool = self.store.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM certificates WHERE id='caddy-local' AND trusted=1)",
-            [],
-            |r| r.get(0),
-        )?;
+        let trusted = crate::platform::ca_trusted(&crate::tls::CaddyTls.ca_path(&self.home));
         for site in &mut sites {
             site.status = if !site.present {
                 "missing"
@@ -220,6 +258,8 @@ impl Application {
                 defaults.insert(kind.key().into(), r.version);
             }
         }
+        let mut setup = crate::setup::state(&self.store, &self.home)?;
+        setup.dns_server = self.dns_owned();
         Ok(Snapshot {
             home: self.home.root().to_string_lossy().into(),
             platform: crate::platform::platform_key(),
@@ -230,9 +270,25 @@ impl Application {
             services,
             databases: crate::database::instances(&self.store)?,
             issues: self.issues.clone(),
-            dns_ready: crate::dns::LocalDns.ready(&hosts),
+            dns_ready: self.dns_owned() && crate::dns::LocalDns.ready(&hosts),
             ca_present: ca,
             active: self.active,
+            binary_roles: [RuntimeType::Php, RuntimeType::Mysql, RuntimeType::Caddy]
+                .into_iter()
+                .map(|kind| (kind.key().to_string(), crate::platform::binary_roles(&kind)))
+                .collect(),
+            project_databases: crate::database::provision::bindings(&self.store)?,
+            setup,
+            php_settings: runtime::installed(&self.store)?
+                .into_iter()
+                .filter(|r| r.manifest.runtime == RuntimeType::Php)
+                .map(|r| {
+                    Ok((
+                        r.manifest.version.clone(),
+                        runtime::php_settings(&self.home, &r)?,
+                    ))
+                })
+                .collect::<Result<_>>()?,
         })
     }
     pub fn start_all(&mut self) -> Result<()> {
@@ -306,12 +362,6 @@ impl Application {
                 .iter()
                 .map(|(s, _)| (s.id.clone(), s.resolved["php"].clone()))
                 .collect();
-            if self.options.system_setup
-                && let Err(e) = crate::tls::CaddyTls.trust(&self.store, &self.home)
-                && !self.issues.contains(&e.to_string())
-            {
-                self.issues.push(e.to_string());
-            }
         }
         if routes.is_empty() {
             self.routed.clear();
@@ -327,21 +377,25 @@ impl Application {
         if self.supervisor.contains(&runtime.id) {
             return Ok(());
         }
+        runtime::validate_at(&runtime.manifest, &runtime.root(&self.home))?;
         let cfg = runtime::php_config(&self.home, &runtime.manifest.version)?;
         let ini = runtime::write_php_config(&self.home, runtime, &cfg)?;
         let reserve = PortManager::allocate(&self.store, &runtime.id)?;
         let port = reserve.port;
         let env = BTreeMap::from([
-            (
-                "PHP_INI_SCAN_DIR".into(),
-                ini.parent().expect("config dir").to_string_lossy().into(),
-            ),
+            ("PHP_INI_SCAN_DIR".into(), String::new()),
             ("PHP_FCGI_MAX_REQUESTS".into(), "0".into()),
+            ("PHPRC".into(), ini.to_string_lossy().into()),
         ]);
         let spec = Spec {
             key: runtime.id.clone(),
             binary: runtime.binary(&self.home, "fastcgi")?,
-            args: vec!["-b".into(), format!("127.0.0.1:{port}")],
+            args: vec![
+                "-c".into(),
+                ini.to_string_lossy().into(),
+                "-b".into(),
+                format!("127.0.0.1:{port}"),
+            ],
             cwd: runtime.root(&self.home),
             env,
             port: Some(port),

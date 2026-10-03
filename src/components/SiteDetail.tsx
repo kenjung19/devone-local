@@ -1,4 +1,5 @@
 import type { Site, Snapshot, Action } from "../contracts";
+import { Provision } from "./Provision";
 import { Badge } from "./Badge";
 export function Stat({ label, value }: { label: string; value: string }) {
   return (
@@ -14,12 +15,14 @@ export function SiteDetail({
   busy,
   act,
   back,
+  logs,
 }: {
   site: Site;
   data: Snapshot;
   busy: boolean;
   act: (a: Action) => Promise<void>;
   back: () => void;
+  logs: () => void;
 }) {
   return (
     <>
@@ -73,15 +76,32 @@ export function SiteDetail({
               </dd>
             </div>
           ))}
+          <dt>Effective PHP source</dt>
+          <dd>
+            {site.overrides.php ? "Site override" : "Global default"} ·{" "}
+            {site.resolved.php ?? "unconfigured"}
+          </dd>
+          <dt>Effective MySQL source</dt>
+          <dd>
+            {data.project_databases.some((b) => b.site_id === site.id)
+              ? "Persistent project database binding"
+              : site.overrides.mysql
+                ? "Site override"
+                : "Global default"}{" "}
+            · {site.resolved.mysql ?? "unconfigured"}
+          </dd>
+          <dt>DNS</dt>
+          <dd>{data.dns_ready ? "Wildcard .test ready" : "Setup required"}</dd>
           <dt>HTTPS</dt>
           <dd>
             <Badge value={site.https} />
           </dd>
         </dl>
         <div className="panel-buttons">
+          <button onClick={logs}>Logs</button>
           <button
             className="primary"
-            disabled={busy || site.status !== "running"}
+            disabled={busy || site.status !== "running" || !data.dns_ready}
             onClick={() => void act({ type: "open_site", site_id: site.id })}
           >
             Open Site ↗
@@ -100,6 +120,7 @@ export function SiteDetail({
           </button>
         </div>
       </section>
+      <Provision site={site} data={data} busy={busy} act={act} />
       {site.issue && <div className="alert error">{site.issue}</div>}
       <p className="footnote">
         Overrides are persisted independently of global defaults. Terminal PATH

@@ -570,3 +570,26 @@ footer span {
     flex-wrap: wrap;
   }
 }
+.setup-dialog {
+  max-width: 860px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+.dialog {
+  max-height: 90vh;
+  overflow-y: auto;
+}
+.extension-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 18px;
+}
+.extension-choice input {
+  width: auto;
+}
+fieldset {
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  margin: 12px 0;
+}

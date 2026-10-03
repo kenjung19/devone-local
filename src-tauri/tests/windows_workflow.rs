@@ -76,7 +76,7 @@ fn concurrent_native_runtime_workflow() {
     home.ensure().unwrap();
     for name in ["modern", "legacy"] {
         std::fs::create_dir_all(home.www().join(name)).unwrap();
-        std::fs::write(home.www().join(name).join("index.php"),"<?php header('Content-Type: application/json'); echo json_encode(['php'=>PHP_VERSION]);").unwrap();
+        std::fs::write(home.www().join(name).join("index.php"),"<?php header('Content-Type: application/json'); echo json_encode(['php'=>PHP_VERSION,'memory'=>ini_get('memory_limit')]);").unwrap();
     }
     std::fs::create_dir_all(home.www().join("framework/public")).unwrap();
     std::fs::write(home.www().join("framework/artisan"), "").unwrap();
@@ -137,6 +137,11 @@ fn concurrent_native_runtime_workflow() {
         Application::open_with_options(home.clone(), options).is_err(),
         "One controller per home"
     );
+    devone::setup::prepare_ca(&app.store, &home).unwrap();
+    assert!(
+        home.path("certs/caddy/pki/authorities/local/root.crt")
+            .is_file()
+    );
     app.start_all().unwrap();
     assert_eq!(request(&home, "modern.test")["php"], "8.5.1");
     assert_eq!(request(&home, "legacy.test")["php"], "8.3.28");
@@ -150,6 +155,74 @@ fn concurrent_native_runtime_workflow() {
         .unwrap()
         .pid;
     assert!(runtime::remove(&app.store, &home, &php_a.reference()).is_err());
+    let php_ini = php_b.root(&home).join("php.ini");
+    let original = std::fs::read(&php_ini).ok();
+    let config = runtime::PhpConfig {
+        directives: BTreeMap::from([
+            ("memory_limit".into(), "192M".into()),
+            ("date.timezone".into(), "Asia/Bangkok".into()),
+        ]),
+        extensions: vec![],
+    };
+    let enabled = runtime::PhpConfig {
+        directives: config.directives.clone(),
+        extensions: vec!["curl".into()],
+    };
+    let enabled_path = runtime::write_php_config(&home, &php_b, &enabled).unwrap();
+    let mut env = BTreeMap::from([
+        ("PHP_INI_SCAN_DIR".into(), String::new()),
+        ("PHPRC".into(), enabled_path.to_string_lossy().into()),
+    ]);
+    let modules = devone::process::run_checked(
+        &php_b.binary(&home, "cli").unwrap(),
+        &["-m".into()],
+        &php_b.root(&home),
+        &env,
+        Duration::from_secs(10),
+    )
+    .unwrap();
+    assert!(modules.lines().any(|l| l.trim() == "curl"));
+    let managed = runtime::write_php_config(&home, &php_b, &config).unwrap();
+    env.insert("PHPRC".into(), managed.to_string_lossy().into());
+    let modules = devone::process::run_checked(
+        &php_b.binary(&home, "cli").unwrap(),
+        &["-m".into()],
+        &php_b.root(&home),
+        &env,
+        Duration::from_secs(10),
+    )
+    .unwrap();
+    assert!(
+        !modules.lines().any(|l| l.trim() == "curl"),
+        "Disabling an originally enabled extension must take effect"
+    );
+    let before_ini = std::fs::read(&managed).unwrap();
+    let bad = runtime::PhpConfig {
+        directives: Default::default(),
+        extensions: vec!["missing_devone_extension".into()],
+    };
+    assert!(runtime::write_php_config(&home, &php_b, &bad).is_err());
+    assert_eq!(std::fs::read(&managed).unwrap(), before_ini);
+    assert_eq!(std::fs::read(&php_ini).ok(), original);
+    let legacy_pid = before
+        .services
+        .iter()
+        .find(|s| s.key == php_a.id)
+        .unwrap()
+        .pid;
+    app.supervisor.stop(&app.store, &php_b.id).unwrap();
+    app.start_all().unwrap();
+    assert_eq!(
+        app.snapshot()
+            .unwrap()
+            .services
+            .iter()
+            .find(|s| s.key == php_a.id)
+            .unwrap()
+            .pid,
+        legacy_pid
+    );
+    assert_eq!(request(&home, "modern.test")["memory"], "192M");
     // An explicit default change leaves the explicit modern override unchanged.
     app.set_default(php_b.reference()).unwrap();
     assert_eq!(app.site(&legacy.id).unwrap().resolved["php"], "8.5.1");
@@ -172,14 +245,81 @@ fn concurrent_native_runtime_workflow() {
         Duration::from_secs(10),
     )
     .unwrap();
+    let modern_site = app.site(&modern.id).unwrap();
+    let global_path = std::env::var_os("PATH");
+    let terminal_env = devone::tools::environment(&app.store, &home, &modern_site).unwrap();
+    let terminal_output = devone::process::run_checked(
+        &devone::platform::system_executable("cmd.exe").unwrap(),
+        &["/D".into(), "/C".into(), "php -v".into()],
+        std::path::Path::new(&modern_site.project_path),
+        &terminal_env,
+        Duration::from_secs(10),
+    )
+    .unwrap();
+    assert!(terminal_output.contains("8.5.1"));
+    assert_eq!(std::env::var_os("PATH"), global_path);
+    let binding = devone::database::provision::provision(
+        &app.store,
+        &home,
+        &mysql_b,
+        &modern_site,
+        "modern_project",
+        mysql_port,
+    )
+    .unwrap();
+    let repeated = devone::database::provision::provision(
+        &app.store,
+        &home,
+        &mysql_b,
+        &modern_site,
+        "modern_project",
+        mysql_port,
+    )
+    .unwrap();
+    assert_eq!(binding.credential_ref, repeated.credential_ref);
+    let password = devone::database::provision::secret(&home, &binding.credential_ref).unwrap();
+    use mysql::prelude::Queryable;
+    let mysql_options = mysql::OptsBuilder::new()
+        .ip_or_hostname(Some("127.0.0.1"))
+        .tcp_port(mysql_port)
+        .user(Some(&binding.username))
+        .pass(Some(password.as_str()))
+        .prefer_socket(false);
+    let mut connection = mysql::Conn::new(mysql_options).unwrap();
+    connection
+        .query_drop("CREATE TABLE modern_project.proof(value INT)")
+        .unwrap();
+    assert!(
+        connection
+            .query_drop("SELECT * FROM devone_check.proof")
+            .is_err()
+    );
+    assert!(
+        connection
+            .query_drop("CREATE DATABASE unrelated_database")
+            .is_err()
+    );
+    app.set_default(mysql_a.reference()).unwrap();
+    assert_eq!(app.site(&modern.id).unwrap().resolved["mysql"], "8.4.3");
+    assert!(
+        app.set_override(&modern.id, RuntimeType::Mysql, Some("5.7.39"))
+            .is_err()
+    );
+    let shared = std::sync::Arc::new(std::sync::Mutex::new(app));
+    let watcher = devone::app::watcher::watch(shared.clone()).unwrap();
     std::fs::create_dir(home.www().join("new-project")).unwrap();
     std::fs::write(
         home.www().join("new-project/index.php"),
-        "<?php header('Content-Type: application/json'); echo json_encode(['php'=>PHP_VERSION]);",
+        "<?php header('Content-Type: application/json'); echo json_encode(['php'=>PHP_VERSION,'memory'=>ini_get('memory_limit')]);",
     )
     .unwrap();
-    app.scan().unwrap();
     assert_eq!(request(&home, "new-project.test")["php"], "8.5.1");
+    drop(watcher);
+    let mut app = std::sync::Arc::try_unwrap(shared)
+        .ok()
+        .unwrap()
+        .into_inner()
+        .unwrap();
     assert_eq!(
         app.snapshot()
             .unwrap()
@@ -191,10 +331,28 @@ fn concurrent_native_runtime_workflow() {
         caddy_pid,
         "Caddy reload preserves PID"
     );
-    app.stop_all().unwrap();
+    app.shutdown().unwrap();
     assert!(app.snapshot().unwrap().services.iter().all(|s| !s.healthy));
     drop(app);
-    let mut app = Application::open_with_options(home.clone(), options).unwrap();
+    let mut app = Application::open_with_options(
+        home.clone(),
+        Options {
+            system_setup: false,
+            autostart: true,
+        },
+    )
+    .unwrap();
+    assert!(app.active);
+    assert_eq!(
+        app.snapshot()
+            .unwrap()
+            .services
+            .iter()
+            .filter(|s| s.healthy)
+            .count(),
+        4,
+        "Autostart starts only the required PHP, MySQL and Caddy versions"
+    );
     assert_eq!(app.site(&modern.id).unwrap().overrides["php"], "8.5.1");
     app.start_all().unwrap();
     let args = vec![
@@ -216,6 +374,14 @@ fn concurrent_native_runtime_workflow() {
     )
     .unwrap();
     assert_eq!(output.trim(), "42");
+    let stored = devone::database::provision::bindings(&app.store)
+        .unwrap()
+        .remove(0);
+    assert_eq!(stored.credential_ref, binding.credential_ref);
+    assert_eq!(
+        *devone::database::provision::secret(&home, &stored.credential_ref).unwrap(),
+        *password
+    );
     assert_eq!(request(&home, "modern.test")["php"], "8.5.1");
     app.stop_all().unwrap();
     assert!(home.path("database/mysql/8.4.3").is_dir());

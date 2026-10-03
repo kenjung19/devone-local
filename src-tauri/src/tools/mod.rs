@@ -6,7 +6,7 @@ use crate::{
     storage::Store,
 };
 use std::collections::BTreeMap;
-pub fn terminal(store: &Store, home: &Home, site: &Site) -> Result<()> {
+pub fn environment(store: &Store, home: &Home, site: &Site) -> Result<BTreeMap<String, String>> {
     let mut paths = Vec::new();
     for kind in [RuntimeType::Php, RuntimeType::Mysql] {
         if let Some(version) = site.resolved.get(kind.key()) {
@@ -48,13 +48,14 @@ pub fn terminal(store: &Store, home: &Home, site: &Site) -> Result<()> {
         )?;
         let config = runtime::php_config(home, version)?;
         let ini = runtime::write_php_config(home, &runtime, &config)?;
-        env.insert(
-            "PHP_INI_SCAN_DIR".into(),
-            ini.parent()
-                .expect("config directory")
-                .to_string_lossy()
-                .into(),
-        );
+        env.insert("PHPRC".into(), ini.to_string_lossy().into());
+        env.insert("PHP_INI_SCAN_DIR".into(), String::new());
     }
-    crate::platform::terminal(std::path::Path::new(&site.project_path), &env)
+    Ok(env)
+}
+pub fn terminal(store: &Store, home: &Home, site: &Site) -> Result<()> {
+    crate::platform::terminal(
+        std::path::Path::new(&site.project_path),
+        &environment(store, home, site)?,
+    )
 }

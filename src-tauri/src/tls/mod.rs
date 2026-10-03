@@ -22,10 +22,17 @@ impl TlsProvider for CaddyTls {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect::<String>();
-        if store.setting("tls.ca_fingerprint")?.as_deref() == Some(&fingerprint) {
+        if store.setting("tls.ca_fingerprint")?.as_deref() == Some(&fingerprint)
+            && crate::platform::ca_trusted(&path)
+        {
             return Ok(());
         }
         crate::platform::trust_ca(&path)?;
+        if !crate::platform::ca_trusted(&path) {
+            return fail(
+                "The CA is not present in the current user trust store after installation",
+            );
+        }
         store.set_setting("tls.ca_fingerprint", &fingerprint)?;
         store.conn.execute("INSERT INTO certificates(id,path,trusted) VALUES('caddy-local',?1,1) ON CONFLICT(id) DO UPDATE SET path=excluded.path,trusted=1",[path.to_string_lossy().to_string()])?;
         Ok(())

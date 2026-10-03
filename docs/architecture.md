@@ -1,123 +1,75 @@
-# สถาปัตยกรรมและสถานะ DEVONE Local
+# สถาปัตยกรรม DEVONE Local
+
+คง Tauri 2 + React + TypeScript + Rust core และ SQLite เดิม Windows x64 เป็น operational target; macOS/Linux มี boundary และรายงาน unsupported สำหรับ OS integration ที่ยังไม่มี implementation
 
 ## โครงสร้าง
 
-```text
-devone-local/
-├── .cargo/config.toml           # จำกัด compile concurrency
-├── package.json / pnpm-lock.yaml
-├── src/
-│   ├── contracts.ts             # typed IPC request/response
-│   ├── bridge.ts                # Tauri invoke
-│   ├── presentation.ts / presentation.test.ts
-│   ├── App.tsx                  # Sites/Runtimes/Databases/Logs/Settings
-│   ├── components/              # Badge, SiteDetail, RuntimeDialogs, Logs
-│   ├── main.tsx
-│   └── style.css
-├── src-tauri/
-│   ├── Cargo.toml / Cargo.lock / build.rs
-│   ├── tauri.conf.json / capabilities/
-│   ├── migrations/001_foundation.sql
-│   ├── tests/                   # windows_workflow, process_lifecycle, native Rust fixture
-│   ├── icons/                   # source SVG + desktop icons
-│   └── src/
-│       ├── app/                 # application orchestration + snapshot
-│       ├── core/                # errors, runtime references, service state
-│       ├── config/              # DEVONE_HOME provider
-│       ├── projects/            # adapters, discovery, safe hostnames
-│       ├── sites/               # site model
-│       ├── catalog/             # replaceable manifests
-│       ├── runtime/             # import/install/validate/default/remove/PHP config
-│       ├── process/             # owned child lifecycle, bounded commands/logging
-│       ├── database/            # DatabaseEngine + MySQL
-│       ├── ports/               # persisted allocations, reservations, health
-│       ├── storage/             # SQLite migrations
-│       ├── dns/                 # DnsProvider
-│       ├── tls/                 # TlsProvider, Caddy CA
-│       ├── webserver/           # WebServer + Caddy generation/validate/reload
-│       ├── tools/               # per-site terminal environment
-│       ├── platform/
-│       │   ├── windows.rs       # Job Objects, hosts, trust, launch
-│       │   ├── macos.rs         # future adapter, unsupported operations
-│       │   └── linux.rs         # future adapter, unsupported operations
-│       ├── ipc.rs
-│       ├── main.rs
-│       └── bin/core.rs
-├── examples/runtime-manifest.json
-└── docs/
-```
+| ส่วน | หน้าที่ |
+|---|---|
+| src/contracts.ts / bridge.ts | Typed IPC และ Tauri commands |
+| src/App.tsx / components | Sites, Installed/Available Runtimes, Databases, Logs, Settings, Setup, PHP form, provisioning |
+| src-tauri/src/app | Orchestration, snapshot, dependency reconciliation, controller lock, shared filesystem watcher |
+| catalog / assets/runtime-catalog.json | Bundled/local/remote sources, schema/revision/integrity, last-good cache |
+| runtime | Registry, import/install/remove guards, exact version validation, install progress, candidate PHP config |
+| database / provision | MySQL lifecycle, persistent data, protocol health, project grants and credential references |
+| dns / server | Owned loopback UDP/TCP .test authoritative resolver |
+| platform / wildcard | Windows NRPT fixed-scope elevated helper and system resolution health |
+| platform/windows.rs | Job Objects, native system executable resolution, current-user CA verification, DPAPI, listener PID ownership |
+| process | Owned Child supervisor, health transitions, bounded recovery, graceful connected-socket shutdown |
+| ports / storage / config | Port reservations, SQLite migrations, single DEVONE_HOME provider |
+| projects / sites / webserver / tls / tools | Discovery/adapters, bindings, Caddy reload/HTTPS, CA, scoped terminal |
 
-## SQLite schema / migrations
+## State และ migrations
 
-Migration 001 รัน transaction และใช้ PRAGMA user_version ปฏิเสธฐานข้อมูลจากรุ่นใหม่กว่า เปิด foreign_keys และ WAL
+SQLite ใช้ WAL/foreign keys และ transaction migrations 001→002; version ใหม่กว่าที่รองรับถูกปฏิเสธ ไม่เปลี่ยน migration 001 ของ state เดิม
 
 | Table | หน้าที่ |
 |---|---|
-| sites | project path/hostname unique, adapter/document root, present/issue, timestamps |
-| site_runtime_overrides | (site_id, kind) unique และ logical version reference |
-| runtime_catalog | manifest JSON จาก catalog ภายนอก |
-| runtime_installations | (kind, version) unique, relative install path, manifest |
-| database_instances | runtime reference, relative data path, initialized flag |
-| port_allocations | owner unique และ port unique |
-| process_state | service key, pid/status/timestamp; ไม่ adopt PID ที่ค้าง |
-| settings | defaults, autostart |
-| certificates | CA path และสถานะ trust ที่บันทึกไว้ |
-| tools | extension foundation ยังไม่มี tool manager UI |
+| sites | unique path/hostname, present/issues, framework/document root |
+| site_runtime_overrides | logical exact version ต่อ site/kind |
+| runtime_catalog / runtime_installations | artifact metadata และ installed registry |
+| database_instances | persistent data path และ initialize state ต่อ MySQL version |
+| project_databases | site→exact instance, database/user, encrypted credential reference, pending/ready |
+| port_allocations | unique owner/port |
+| process_state | PID/status/timestamp; stale PID ไม่ถูก adopt |
+| settings | defaults, autostart, setup completion, catalog source/revision/cache, CA fingerprint |
+| certificates / tools | certificate metadata และ future tool foundation |
 
-project database content อยู่ใน DEVONE_HOME/database/mysql/<exact-version> ไม่เก็บใน SQLite
+Catalog cache/registry/revision commit ใน transaction เดียว ไม่ refresh remote จาก network ทุก startup การ refresh เป็น action explicit แต่ state ใช้ last-good cache ได้
 
-## Platform / isolation
+## DNS และ privilege
 
-Shared models ใช้ logical runtime references ไม่เก็บ absolute Windows executable paths Site project/document root เป็น filesystem paths ตาม platform Home เป็น path provider เดียว Runtime categories ไม่จำกัด PHP/MySQL มี Node/Other สำหรับอนาคต
+Normal app owns 127.0.0.1:53 UDP/TCP listeners ไม่มี Windows service Resolver ตอบเฉพาะชื่อใต้ .test เป็น A 127.0.0.1 และ AAAA no-data; ชื่ออื่น REFUSED ไม่มี upstream hijack
 
-Windows adapter ใช้ native process API, Job Object KILL_ON_JOB_CLOSE, cmd.exe terminal โดยไม่ใช้ shell script เป็น orchestration แก้ hosts เฉพาะ DEVONE managed block และสำรองครั้งแรก local CA trust ใช้ certutil current-user ไม่แก้ global PATH
+Windows helper รับเพียง `--devone-setup-dns` หรือ `--devone-remove-dns` ก่อนเปิด Home/แอป ใช้ native registry API แก้เพียง:
 
-macOS/Linux stub คืน unavailable สำหรับ OS integration ไม่อ้างว่า support แล้ว
+`HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig\{9073AE66-0413-46F2-9F35-D0E001000001}`
 
-## Runtime / process architecture
+Values: Name REG_MULTI_SZ [.test], GenericDNSServers 127.0.0.1, ConfigOptions 8, Version 2, DisplayName/Comment ownership marker ตรวจ local/GPO namespace conflicts ไม่เปลี่ยน adapter DNS servers ไม่ใช้ arbitrary path/command จากผู้ใช้ Remove เฉพาะ owned policy Parent ที่ไม่ elevated flush resolver cache หลัง helper จบ Helper ไม่เขียน files ใน Home
 
-Manifest: runtime category, exact version, platform+architecture key, binary roles, HTTPS source, SHA-256, metadata
-Registry: list installed/available, import, download ZIP, validate, remove guard, default/override resolution
-PHP: shared FastCGI child ต่อ exact version, dynamic port, per-runtime generated ini/directives/extensions
-MySQL: DatabaseEngine trait, shared instance ต่อ exact version, own cnf/data/log/port, initialize once ไม่ upgrade data อัตโนมัติ
-Caddy: generated routes จาก sites + PHP allocated ports, validate before safe reload, loopback binding, TLS internal, dedicated storage under certs
-Supervisor: owns Child handles, stdout/stderr files, TCP readiness, unexpected exit status, bounded health wait, graceful Caddy/MySQL shutdown แล้ว fallback kill, Windows Job Objects กัน orphan
-Home lock: มี controller เดียวต่อ DEVONE_HOME ไม่ adopt/kill arbitrary stale PIDs
-Start All: เริ่ม dependencies ของไซต์ present ที่มี PHP binding รวมถึง MySQL bindings และ Caddy ไม่เริ่ม installed versions ที่ไม่ถูกใช้
+Readiness ตรวจ owned live resolver UDP/TCP, policy contents และ Windows DnsQuery(no hosts/cache) ใน bounded background refresh ไม่ใช้ cached SQLite success แทน OS state Hosts fallback เป็น action explicit เท่านั้น Discovery ไม่เขียน privileged state
 
-## Features ที่มี code รองรับ
+Policy คงอยู่เมื่อปิดแอป ดังนั้น .test จะ resolve ไม่ได้จนเปิดแอปใหม่ ถอนผ่าน Settings ได้ ไม่มีผลต่อชื่อ namespace อื่น
 
-startup scan + recursive filesystem watcher (register เฉพาะ direct child directories), Plain PHP/Laravel adapters, sanitized .test domains, conflict/reserved checks, missing records retained, custom runtime import, catalog ZIP install, per-site binding persistence, concurrent version pools/instances, terminal environment, generated config, start/stop/restart, health/log dashboard
+## Runtime/config/database isolation
 
-## Phase 1 ที่ยังไม่ครบ
+Exact manifest platform/version/binary role ไม่เก็บ executable commands Install ใช้ HTTPS SHA-256, archive limits, path/symlink rejection, optional archive_root แล้ว validate binary ก่อน register ไม่อัปเกรด runtime อัตโนมัติ Node/Other metadata ขยายได้ แต่ execution ปฏิเสธใน Phase 1
 
-- wildcard DNS resolver/service: ตอนนี้ใช้ hosts managed block แยก OS ต้อง elevation เมื่อต้องเพิ่มรายการ
-- privilege helper/UAC setup wizard: ยังไม่มี ต้อง launch elevated เอง
-- curated remote runtime catalog: ยังไม่มี feed อัตโนมัติ ผู้ใช้จัด local catalog หรือ import
-- MySQL credential provisioning/rotation และ database/user ต่อไซต์: ยังไม่มี ใช้ shared local instance
-- extension availability/dependency validation และ polished extension toggle UI: model + JSON config มีแล้ว
-- multiple workers ต่อ PHP pool / automatic crash backoff restart: ยังไม่มี
-- authenticated protocol health: PHP/MySQL health เป็น TCP readiness ส่วน Caddy เป็น admin endpoint port
-- generated IPC schema/codegen: types ฝั่ง TS และ Rust ต้องปรับร่วมกัน
-- installer, tray, signed binaries, native dialog picker และ visual desktop QA ยังต้องเพิ่ม
-- Tool Manager มี boundary/table และ terminal context ยังไม่มี Composer installation
-- macOS/Linux runtime execution ไม่รองรับ และงาน out-of-scope ไม่ได้ทำ
+PHP มีหนึ่ง FastCGI pool ต่อ exact version Managed ini copy ค่าต้นฉบับที่ไม่ override โดยไม่แก้ไฟล์ต้นฉบับ Extension directives สร้างจาก selected physical files Candidate validation ใช้ PHPRC + PHP_INI_SCAN_DIR ว่าง ตรวจ -v/--ini/-m ก่อน atomic replacement เปิด CLI terminal ใช้ context เดียวกัน ผลทดสอบ curl enable/disable และ actual memory_limit ช่วยตรวจการโหลด config
 
-## ความเสี่ยง/ข้อจำกัด
+MySQL หนึ่ง shared instance ต่อ exact version ข้อมูลอยู่ database/mysql/<version> ไม่ upgrade/reinitialize nonempty data Persistent allocated port, no-defaults/cnf, 127.0.0.1, mysqlx off สำหรับรุ่น 8+ Project database pin exact instance แม้ global default เปลี่ยนไป สร้าง user สุ่ม password64hexและ grants เฉพาะ database ใช้ escaped underscore ไม่ให้ pattern grant ครอบ schema อื่น Secrets เข้ารหัส DPAPI current-user; SQLite เก็บ reference/status เท่านั้น Root bootstrap password ว่างใช้เฉพาะ administration ของ development instance ไม่มี automatic .env changes
 
-- การปล่อย port reservation ก่อน native child bind มีช่วง race สั้น หากโปรเซสอื่นแย่งพอร์ต start จะต้องรายงานล้มเหลว
-- CA trusted flag เป็นสถานะหลังคำสั่งสำเร็จ ไม่ได้ตรวจ external trust removal ทุกครั้ง
-- hosts block เป็น machine integration ขั้นแรก ไม่ใช่ wildcard *.test; ไม่ลบ unmanaged entries
-- generated config marker ตรวจเพื่อไม่ overwrite user config; managed ini ที่แก้ด้วยมืออาจถูก regenerate ให้แก้ผ่าน directives model
-- PHP distribution compatibility/VC runtime/extensions และ MySQL compatibility กับ CPU/Windows ต้องทดสอบจริงตามเวอร์ชัน
-- MySQL initialization ล้มเหลวอาจทิ้ง directory; แอปปฏิเสธ reinitialize หากมีข้อมูล ต้องตรวจเอง ไม่ลบอัตโนมัติ
-- changing global default เป็น explicit user action และเปลี่ยนเฉพาะ inherited bindings; overrides ไม่เปลี่ยน
-- readiness ไม่ได้ยืนยัน route ทั้งหมดเสมอ integration test จึงตรวจ actual HTTPS content
-- ไม่มี custom runtime execution ใน project โดยอัตโนมัติ binary runtime ที่ import ต้องเชื่อถือได้
+## Supervisor และ startup
 
-## Native Windows integration test
+Controller เดียวต่อ Home Owned Child + Windows Job Object เท่านั้นที่ถูก terminate ไม่ adopt stale PID Listener health ตรวจ TCP owner PID/membership ใน owned Job Object จึงไม่ยอมรับ unrelated process ที่บังพอร์ต
 
-ใช้ trusted fixture dirs ที่มี exact versions ตาม test (เป็น test fixture versions ไม่ใช่ catalog constants):
+Unexpected exit log และ restart สูงสุดสามครั้ง backoff 1/2/4 วินาทีต่อ cycle Explicit stop/restart ล้าง pending retry Health transitions persisted Graceful Caddy /stop และ MySQL SHUTDOWN เปิด connection แล้วตรวจ listener ownership ก่อนส่งคำสั่ง Socket เดิมไม่สลับไป server อื่น Fallback kill/wait เฉพาะ owned Child
+
+Startup scan + persisted overrides/defaults/provisioned bindings เริ่มเฉพาะ dependencies ของ present valid sites เมื่อ autostart active Runtime binary validation/MySQL protocol health/Caddy config validation precede readiness New folder watcher debounce แล้ว reconcile routes/dependenciesโดยไม่ restart แอป Caddy reload คง PID เมื่อ config ผ่าน
+
+## Native Windows verification
+
+ใช้ fixture distributions ที่เชื่อถือได้ พอร์ต 80/443 ว่าง Native test ไม่เขียน machine DNS policy หรือ Windows trust store ใช้ Caddy root CA เฉพาะ test HTTP client:
 
 ```powershell
 $env:DEVONE_TEST_ROOT = 'D:\runtime-test-workspace'
@@ -130,4 +82,8 @@ $env:DEVONE_FIXTURE_CADDY_VERSION = '2.11.7'
 cargo test --manifest-path src-tauri/Cargo.toml --test windows_workflow -- --ignored --nocapture
 ```
 
-สร้าง temporary home, copy runtime fixtures, ตรวจ HTTPS โดยใช้ Caddy root CA เฉพาะ test client และ resolve DNS เฉพาะ client ไม่ install trust/แก้ hosts ตรวจ two PHP/two MySQL concurrently, actual SQL persistence, Laravel document root, Caddy PID stable หลัง reload, stop/restart และ guard runtime removal
+Fixture versions เป็น verification baseline ไม่ใช่ catalog defaults รายงาน test results และข้อจำกัดอยู่ [verification](verification.md)
+
+## ข้อจำกัดที่เหลือ
+
+UAC/NRPT/CA trust install-remove และ GUI flow ต้อง manual test บน Windows จริง Session automated tests ไม่อ้างว่าผ่านจุดเหล่านี้ ไม่มี installer/signing/tray/native folder picker/Composer manager/credential rotation/database migration UI หรือ macOS/Linux execution Port reservation ก่อน native bind มี race สั้นที่ health ownership guard ตรวจจับ Root bootstrap ยัง password ว่างบน loopback Catalog remote endpoint ต้องกำหนด URL+metadata checksum โดย explicit action Runtime binary ที่ import/downloadต้องเชื่อถือได้

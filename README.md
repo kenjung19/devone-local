@@ -1,58 +1,63 @@
 # DEVONE Local
 
-DEVONE Local รุ่นสร้างใหม่: Tauri 2 + React + TypeScript + Vite และ Rust core ใช้ native binaries, SQLite และ Caddy รองรับ Windows x64 ก่อน ไม่มี Docker หรือ PowerShell ใน runtime-control architecture
+DEVONE Local ใช้ Tauri 2 + React + TypeScript + Vite และ Rust core เดิม รัน PHP/MySQL/Caddy native binaries แยก exact version บน Windows x64 ไม่ใช้ Docker หรือ PowerShell เป็น runtime orchestrator
 
 ## เริ่มใช้งาน
 
-ติดตั้ง Rust stable พร้อม MSVC Build Tools และ WebView2 ตาม [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) และ Node.js 22.12+ / pnpm
+Toolchain ที่ล็อกไว้: Node **24.21.0 LTS**, pnpm **12.8.1**, Rust **1.99.0** พร้อม MSVC Build Tools และ WebView2 ตาม [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) ใช้ `.node-version`, `packageManager` และ `rust-toolchain.toml` ไม่อัปเกรดเวอร์ชันอัตโนมัติ
 
 ```powershell
 pnpm install --frozen-lockfile
 pnpm desktop
 ```
 
-หน้าจอ browser อย่างเดียว: `pnpm dev` (ไม่มี runtime data จำลอง)
-สร้าง frontend: `pnpm build`
-สร้าง desktop executable: `pnpm desktop:build` (ยังไม่สร้าง installer)
-CLI core: `pnpm core snapshot`, `pnpm core start` (Ctrl+C หยุดบริการที่เป็นเจ้าของ)
+เปิดแอปด้วยบัญชีผู้ใช้ปกติ First-run wizard ตรวจ Home, wildcard DNS, runtimes และ CA จริง เลือกติดตั้งเวอร์ชันจาก bundled catalog หรือนำเข้า native distribution ที่เชื่อถือได้ รุ่นแรกเป็น default ตั้งค่า Windows DNS ผ่าน helper ที่แสดง UAC ครั้งเดียว จากนั้นสร้าง Caddy CA และติดตั้ง trust สำหรับผู้ใช้ปัจจุบัน Retry แต่ละขั้นตอนได้ หรือข้ามขั้นที่ยังไม่พร้อม แล้วเปิด wizard อีกครั้งจาก Settings
 
-DEVONE_HOME ค่าเริ่มต้น Windows: `%LOCALAPPDATA%/Devone`
-กำหนด home แยกก่อน launch ได้:
+MySQL initialization เป็นขั้นที่เลือกทำได้ใน wizard/Databases เมื่อมีไซต์ที่ใช้ instance นั้น แอปจะ initialize เฉพาะ data directory ใหม่ ห้าม reinitialize/upgrade data เดิมอัตโนมัติ
+
+DEVONE_HOME ค่าเริ่มต้น: `%LOCALAPPDATA%/Devone` เปลี่ยนก่อนเปิดแอปได้:
+
 ```powershell
 $env:DEVONE_HOME = 'D:\DevoneWorkspace'
 pnpm desktop
 ```
-ไม่แก้ global PATH ไม่เพิ่ม Windows service ไม่แก้ .env
 
-## Workflow ทดสอบ Windows
+## ใช้งานโปรเจกต์
 
-1. เปิด DEVONE และตรวจ Settings > DEVONE_HOME
-2. นำ PHP Windows x64 distribution ที่เชื่อถือได้และแตก ZIP แล้ว เข้า Runtimes > PHP > Import Runtime ระบุ exact version จาก php.exe --version และ paths php.exe / php-cgi.exe
-3. นำ Caddy Windows x64 เข้า Runtimes > Caddy > Import Runtime ระบุ exact version และ caddy.exe
-4. นำ MySQL Windows x64 เข้า Runtimes > MySQL > Import Runtime ระบุ exact version และ bin/mysqld.exe / bin/mysqladmin.exe การนำเข้าเป็นการ COPY ไม่ย้ายต้นฉบับ
-5. รุ่นแรกที่นำเข้าแต่ละประเภทเป็น default ตรวจหรือเปลี่ยน Set default ได้
-6. วางโฟลเดอร์ `demo` ใน `DEVONE_HOME/www` และสร้าง index.php: `<?php echo PHP_VERSION;` ไซต์ปรากฏเองเป็น demo.test
-7. Laravel detection ต้องพบ artisan และ public/index.php; document root จะเป็น public
-8. ตั้ง MySQL override หรือใช้ global default ใน Site detail แล้วกด Start All
-9. Windows hosts setup ต้องใช้ elevated app session ครั้งที่ต้องเขียน managed block: ปิดแอปแล้วเปิด terminal แบบ Administrator รัน pnpm desktop โดยใช้ DEVONE_HOME เดิม กด Sync domains ไม่ต้องแก้ hosts รายไซต์ด้วยตนเอง
-10. พอร์ต localhost 80/443 ต้องว่าง Caddy ใช้ TLS internal และติดตั้ง local CA trust ให้ Windows user ที่ launch แอป เมื่อเริ่มได้ เปิด https://demo.test
-11. นำเข้า PHP/MySQL เวอร์ชันอื่น เลือก override ให้ไซต์หนึ่ง เปิดสองไซต์และตรวจ PHP_VERSION ต่างกัน ส่วน Databases แสดง instance/port แยก
-12. เปิด Terminal ของแต่ละไซต์ แล้ว php -v ต้องตรงกับ site binding ไม่เปลี่ยน PATH นอก terminal นั้น
-13. เพิ่ม/ย้ายโฟลเดอร์ใน www: watcher reconcile อัตโนมัติ การย้ายออกเก็บ site record เป็น missing ไม่ลบข้อมูล
-14. Stop All / Start All / Restart ตรวจ Logs และ process PID หยุด process ที่ DEVONE เป็นเจ้าของเท่านั้น
-15. ปิดแล้วเปิด DEVONE: override/default/port และ MySQL data ยังคงอยู่ ถ้าปิดขณะ active จะ restore dependencies เมื่อเปิดใหม่
+1. วางโฟลเดอร์ `demo` ใน `DEVONE_HOME/www` มี `index.php` แล้วไซต์จะปรากฏเป็น `demo.test` Laravel ต้องพบ `artisan` และ `public/index.php`
+2. เลือก global defaults หรือ site override จาก runtime ที่ติดตั้งแล้ว กด Start All เมื่อ environment active โฟลเดอร์ใหม่จะถูก discover และ route อัตโนมัติ
+3. Wildcard DNS ตอบ `*.test → 127.0.0.1` เท่านั้น ใช้ UDP/TCP 53 และ Caddy ใช้ 80/443 บน loopback ตรวจพอร์ตชนกันผ่าน Setup/Logs
+4. PHP Configure เป็น form ของ directives และ extensions ที่มีไฟล์จริง ตรวจ `php -v`, `--ini`, `-m` ก่อนบันทึกแล้ว restart เฉพาะ version pool Original php.ini ไม่ถูกแก้
+5. Databases จัดการ initialize/start/stop/restart/validate ของแต่ละ exact MySQL version ข้อมูลอยู่ `database/mysql/<version>` และ ports คงอยู่หลังเปิดแอปใหม่
+6. Site detail > Project database สร้าง database/user เฉพาะโปรเจกต์ ใช้ database-specific grants และ credential reference ที่เข้ารหัส Windows DPAPI ปุ่มแสดงรหัสผ่านเป็น action ชัดเจน ไม่แก้ `.env`
+7. Terminal เปิดในโฟลเดอร์ไซต์ โดย PHP/MySQL PATH และ ini context ใช้เฉพาะ terminal นั้น
+8. Site detail > Logs รวม core/Caddy/site/PHP/MySQL ที่เกี่ยวข้อง พร้อม recent errors Stop All และปิดแอปหยุดเฉพาะ process ที่ DEVONE เป็นเจ้าของ
 
-MySQL ใหม่ initialize-insecure: root ไม่มี password สำหรับ local development และ bind เฉพาะ 127.0.0.1 ไม่มี credential UI ในรอบนี้ MySQL X protocol ถูกปิดเพื่อไม่ชนพอร์ตระหว่างเวอร์ชัน อย่าใช้ instance นี้เป็น production
+MySQL administrator สำหรับ development instance ใหม่ยังเป็น root password ว่างบน loopback User ของโปรเจกต์ใช้รหัสผ่านสุ่มและไม่มี global grants การเปลี่ยน MySQL version ของ database ที่ provision แล้วต้องย้ายข้อมูลด้วยตนเอง แอปไม่ migrate ให้อัตโนมัติ
+
+## DNS และ HTTPS
+
+แอปเป็นเจ้าของ loopback DNS resolver เฉพาะช่วงที่เปิด DEVONE ไม่เพิ่ม Windows service ไม่เปลี่ยน DNS servers ของ network adapter Windows NRPT policy มี namespace เดียว `.test` จึงไม่ส่ง DNS ชื่ออื่นเข้า DEVONE Settings > Remove owned DNS policy ใช้ helper ถอนเฉพาะ policy ของ DEVONE
+
+เมื่อปิดแอป `.test` จะไม่ resolve ผ่าน policy นี้จนเปิดแอปใหม่ การถอน policy ไม่ลบ hosts entries ที่โปรแกรมอื่นสร้างไว้ หากมี policy ที่ขัดแย้ง แอปปฏิเสธการเขียนทับ ตรวจ OS resolution แยกจาก registry และ UDP/TCP health
+
+Hosts fallback เป็น action explicit เท่านั้น ใช้ managed block เดิมและต้องมีสิทธิ์เขียน hosts ระบบ แอปไม่เรียกมันใน discovery ปกติ ค่าเริ่มต้นคือ wildcard DNS
+
+Caddy ใช้ local CA ใน `certs/caddy` Trust ใช้ current-user store และตรวจ actual certificate context ใน Windows ไม่อาศัย SQLite trusted flag อย่างเดียว
 
 ## Runtime catalog
 
-ไม่มีเวอร์ชัน hardcode ในแอป catalog อ่านจาก DEVONE_HOME/config/runtime-catalog.json เป็น array ของ manifest อัปเดตได้โดยไม่ release แอป แล้วกด Reload catalog ตัวอย่าง `examples/runtime-manifest.json`
+Bundled metadata อยู่ `src-tauri/assets/runtime-catalog.json` Local override อยู่ `DEVONE_HOME/config/runtime-catalog.json` ใช้ schema:
 
-Install ใช้ HTTPS ZIP + SHA-256 บังคับ, จำกัด archive/expanded size, ปฏิเสธ traversal และ symlink, validate binary --version ก่อน register ZIP ต้องมี binary paths ตรง manifest; nested top-level directory ต้องระบุใน paths ให้ถูก PHP/MySQL distribution อาจต้องมี Microsoft Visual C++ Redistributable ที่เข้ากับรุ่นนั้น
+```json
+{"schema_version":1,"revision":1,"manifests":[]}
+```
 
-Import/validate รัน binary health check หลัง user เลือก runtime อย่างชัดเจน ไม่รัน project scripts
+รองรับ legacy local manifest array ด้วย Settings รองรับ remote HTTPS URL พร้อม metadata SHA-256 ที่ pin ไว้ ไม่ใช้ endpoint ที่แต่งขึ้น Catalog update ไม่ต้อง release แอปใหม่ Revision rollback/schema/integrity failure ไม่ทำลาย last-good registry/cache ซึ่งเก็บใน SQLite transaction เดียว Platform ที่ไม่ตรงถูกกรองออก
 
-## ตรวจสอบ
+Install รับ HTTPS ZIP + SHA-256 เท่านั้น มี byte progress, checksum verification, extraction และ binary validation ไม่ execute คำสั่งจาก catalog `metadata.archive_root` รองรับ MySQL ZIP ที่มี top-level folder Import เป็นการ copy ไม่ย้ายต้นฉบับ Runtime removal ป้องกัน references/defaults/database/running instances
+
+## ตรวจสอบและขอบเขต
 
 ```powershell
 pnpm lint
@@ -64,10 +69,6 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-Native integration test ใช้ binaries จริงแต่ไม่แก้ hosts หรือ Windows trust store ต้องมี localhost 80/443 ว่าง รายละเอียด `docs/architecture.md`
+ดู [architecture](docs/architecture.md), [ผล verification](docs/verification.md) และ [รายงานรอบพัฒนา](docs/phase1-continuation.md) Native fixture test และคำสั่งอยู่ใน architecture
 
-## ขอบเขต
-
-Node และฐานข้อมูลชนิดอื่นยังไม่รัน macOS/Linux มี adapter boundary และ home strategy แต่ desktop/runtime support ยัง unavailable การติดตั้งครั้งแรกยังต้อง import native runtimes หรือจัด catalog เอง รายละเอียดสิ่งที่ทำแล้ว/ยังไม่ครบและความเสี่ยงอยู่ใน `docs/architecture.md`
-
-ผลตรวจสอบจริงและข้อจำกัดของ QA: [docs/verification.md](docs/verification.md)
+`pnpm dev` แสดง frontend โดยไม่มีข้อมูล runtime จำลอง `pnpm desktop:build` สร้าง desktop executable (ยังไม่สร้าง installer) `pnpm core start` ใช้ Ctrl+C หยุด owned services ไม่มี Node execution, database engine อื่น หรือ runtime support macOS/Linux ใน Phase 1

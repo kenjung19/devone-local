@@ -10,25 +10,28 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 default = ["desktop"]
 desktop = ["dep:tauri", "dep:tauri-build"]
 [build-dependencies]
-tauri-build = { version = "2", features = [], optional = true }
+tauri-build = { version = "=2.7.1", features = [], optional = true }
 [dependencies]
-tauri = { version = "2", features = [], optional = true }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-rusqlite = { version = "0.40", features = ["bundled"] }
-thiserror = "2"
-notify = "8"
-ctrlc = "3"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-uuid = { version = "1", features = ["v4"] }
-sha2 = "0.11"
-reqwest = { version = "0.13", features = ["blocking", "rustls"], default-features = false }
-zip = { version = "8", default-features = false, features = ["deflate"] }
+tauri = { version = "=2.12.1", features = [], optional = true }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+thiserror = "=2.0.21"
+notify = "=8.2.0"
+ctrlc = "=3.5.2"
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "json"] }
+uuid = { version = "=1.27.0", features = ["v4"] }
+sha2 = "=0.11.0"
+reqwest = { version = "=0.13.5", features = ["blocking", "rustls"], default-features = false }
+zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
+mysql = { version = "=28.0.3", default-features = false, features = ["minimal-rust"] }
+zeroize = "=1.9.0"
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Registry", "Win32_NetworkManagement_Dns", "Win32_Security_Cryptography", "Win32_System_Memory", "Win32_System_SystemInformation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
+winreg = "=0.56.0"
 [dev-dependencies]
-tempfile = "3"
+tempfile = "=3.27.0"
 [[bin]]
 name = "devone-local"
 path = "src/main.rs"

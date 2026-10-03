@@ -61,12 +61,53 @@ export interface Snapshot {
   dns_ready: boolean;
   ca_present: boolean;
   active: boolean;
+  setup: {
+    completed: boolean;
+    home_ready: boolean;
+    dns_policy: boolean;
+    dns_server: boolean;
+    dns_system: boolean;
+    ca_present: boolean;
+    ca_trusted: boolean;
+    caddy: boolean;
+    php: boolean;
+    mysql: boolean;
+  };
+  php_settings: Record<
+    string,
+    { config: PhpConfig; available_extensions: string[]; original_ini: boolean }
+  >;
+  binary_roles: Record<string, Record<string, string>>;
+  project_databases: {
+    site_id: string;
+    runtime_id: string;
+    database_name: string;
+    username: string;
+    credential_ref: string;
+    status: string;
+  }[];
 }
 export interface PhpConfig {
   directives: Record<string, string>;
   extensions: string[];
 }
+export interface InstallProgress {
+  runtime: string;
+  phase: string;
+  bytes: number;
+  total: number | null;
+  error: string | null;
+}
 export type Action =
+  | { type: "finish_setup"; skip: boolean }
+  | { type: "remote_catalog"; url: string; sha256: string }
+  | {
+      type: "database";
+      runtime: RuntimeRef;
+      operation: "initialize" | "start" | "stop" | "restart" | "validate";
+    }
+  | { type: "provision"; site_id: string; database_name: string }
+  | { type: "reveal_credential"; site_id: string }
   | {
       type:
         | "scan"
@@ -75,7 +116,11 @@ export type Action =
         | "restart"
         | "dns"
         | "trust"
-        | "refresh_catalog";
+        | "refresh_catalog"
+        | "remove_dns"
+        | "hosts_fallback"
+        | "prepare_ca"
+        | "reopen_setup";
     }
   | { type: "import"; manifest: Manifest; source: string }
   | { type: "install" | "remove" | "default" | "validate"; runtime: RuntimeRef }

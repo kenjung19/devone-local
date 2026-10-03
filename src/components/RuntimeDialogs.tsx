@@ -6,24 +6,26 @@ import type {
   Installation,
   PhpConfig,
 } from "../contracts";
-import { runtimeBinaries } from "../presentation";
+
 export function ImportDialog({
   kind,
   data,
   busy,
+  error,
   close,
   act,
 }: {
   kind: RuntimeKind;
   data: Snapshot;
   busy: boolean;
+  error: string;
   close: () => void;
   act: (a: Action) => Promise<void>;
 }) {
   const [version, setVersion] = useState("");
   const [source, setSource] = useState("");
   const [binaries, setBinaries] = useState(
-    JSON.stringify(runtimeBinaries(kind), null, 2),
+    JSON.stringify(data.binary_roles[kind], null, 2),
   );
   const [err, setErr] = useState("");
   return (
@@ -93,7 +95,7 @@ export function ImportDialog({
             onChange={(e) => setBinaries(e.target.value)}
           />
         </label>
-        {err && <p className="error">{err}</p>}
+        {(err || error) && <p className="error">{err || error}</p>}
         <div className="actions">
           <button type="button" onClick={close}>
             Close
@@ -111,76 +113,119 @@ export function ImportDialog({
 }
 export function PhpDialog({
   runtime,
+  data,
   busy,
+  error,
   close,
   act,
 }: {
   runtime: Installation;
+  data: Snapshot;
   busy: boolean;
+  error: string;
   close: () => void;
   act: (a: Action) => Promise<void>;
 }) {
-  const [text, setText] = useState("");
-  const [err, setErr] = useState("");
-  // Require explicit configuration content so opening this dialog cannot erase existing settings.
+  const settings = data.php_settings[runtime.manifest.version];
+  const [config, setConfig] = useState<PhpConfig>(
+    settings?.config ?? { directives: {}, extensions: [] },
+  );
+  const directives = [
+    "memory_limit",
+    "upload_max_filesize",
+    "post_max_size",
+    "max_execution_time",
+    "date.timezone",
+    "display_errors",
+    "error_reporting",
+  ];
   return (
     <div className="overlay">
       <form
         className="dialog"
         onSubmit={(e) => {
           e.preventDefault();
-          try {
-            const c: unknown = JSON.parse(text);
-            if (
-              !c ||
-              typeof c !== "object" ||
-              !("directives" in c) ||
-              !("extensions" in c)
-            )
-              throw new Error("Provide directives and extensions");
-            void act({
-              type: "php_config",
-              version: runtime.manifest.version,
-              config: c as PhpConfig,
-            });
-          } catch (e) {
-            setErr(String(e));
-          }
+          void act({
+            type: "php_config",
+            version: runtime.manifest.version,
+            config,
+          });
         }}
       >
         <h2>PHP {runtime.manifest.version}</h2>
+        {error && (
+          <p className="error" role="alert">
+            {error}
+          </p>
+        )}
         <p>
-          Save a complete configuration to replace DEVONE-managed overrides. A
-          running pool restarts after saving. The distribution’s php.ini is
-          preserved.
+          ตรวจ php -v, --ini, -m ก่อนบันทึก และ restart เฉพาะ pool เวอร์ชันนี้
+          Original php.ini คงเดิม
         </p>
-        <label>
-          Directives and enabled extensions
-          <textarea
-            required
-            rows={10}
-            value={text}
-            placeholder={
-              '{\n  "directives": { "memory_limit": "256M" },\n  "extensions": ["curl", "mbstring", "pdo_mysql"]\n}'
-            }
-            onChange={(e) => setText(e.target.value)}
-          />
-        </label>
-        {err && <p className="error">{err}</p>}
+        {directives.map((key) => (
+          <label key={key}>
+            {key}
+            <input
+              value={config.directives[key] ?? ""}
+              placeholder="ใช้ค่าเดิมของ PHP"
+              onChange={(e) => {
+                const values = { ...config.directives };
+                if (e.target.value) values[key] = e.target.value;
+                else delete values[key];
+                setConfig({ ...config, directives: values });
+              }}
+            />
+          </label>
+        ))}
+        <fieldset>
+          <legend>Extensions ที่พบใน distribution นี้</legend>
+          {settings?.available_extensions.length ? (
+            settings.available_extensions.map((file) => {
+              const short = file
+                .replace(/^php_/, "")
+                .replace(/\.(dll|so)$/, "");
+              const checked =
+                config.extensions.includes(file) ||
+                config.extensions.includes(short);
+              return (
+                <label className="extension-choice" key={file}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={(e) =>
+                      setConfig({
+                        ...config,
+                        extensions: e.target.checked
+                          ? [...config.extensions, file]
+                          : config.extensions.filter(
+                              (v) => v !== file && v !== short,
+                            ),
+                      })
+                    }
+                  />
+                  {file}
+                </label>
+              );
+            })
+          ) : (
+            <p>ไม่พบ extension แยกในโฟลเดอร์ ext</p>
+          )}
+        </fieldset>
         <div className="actions">
           <button type="button" onClick={close}>
             Close
           </button>
           <button
             type="button"
+            disabled={busy}
             onClick={() =>
               void act({ type: "open_ini", version: runtime.manifest.version })
             }
           >
-            Open generated ini
+            Open managed ini
           </button>
           <button className="primary" disabled={busy}>
-            Save configuration
+            Validate & save
           </button>
         </div>
       </form>

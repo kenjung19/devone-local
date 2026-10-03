@@ -47,6 +47,29 @@ pub enum Action {
         site_id: String,
     },
     Dns,
+    RemoveDns,
+    HostsFallback,
+    PrepareCa,
+    FinishSetup {
+        skip: bool,
+    },
+    ReopenSetup,
+    Provision {
+        site_id: String,
+        database_name: String,
+    },
+    RevealCredential {
+        site_id: String,
+    },
+    RemoteCatalog {
+        url: String,
+        sha256: String,
+    },
+    Database {
+        runtime: RuntimeRef,
+        operation: String,
+    },
+
     Trust,
     RefreshCatalog,
     Validate {
@@ -68,6 +91,47 @@ pub struct Response {
 fn apply(app: &mut Application, action: Action) -> Result<Response> {
     let mut message = None;
     match action {
+        Action::Provision {
+            site_id,
+            database_name,
+        } => {
+            let site = app.site(&site_id)?;
+            let version = site
+                .resolved
+                .get("mysql")
+                .ok_or_else(|| Error::Message("Choose an installed MySQL runtime first".into()))?;
+            let item = runtime::find(
+                &app.store,
+                &RuntimeRef {
+                    kind: RuntimeType::Mysql,
+                    version: version.clone(),
+                },
+            )?;
+            crate::database::start(&app.store, &app.home, &mut app.supervisor, &item)?;
+            let port = app.store.conn.query_row(
+                "SELECT port FROM port_allocations WHERE owner=?1",
+                [&item.id],
+                |r| r.get(0),
+            )?;
+            crate::database::provision::provision(
+                &app.store,
+                &app.home,
+                &item,
+                &site,
+                &database_name,
+                port,
+            )?;
+        }
+        Action::RevealCredential { site_id } => {
+            app.site(&site_id)?;
+            let binding = crate::database::provision::bindings(&app.store)?
+                .into_iter()
+                .find(|b| b.site_id == site_id)
+                .ok_or_else(|| Error::Message("No credential exists for this site".into()))?;
+            message = Some(
+                crate::database::provision::secret(&app.home, &binding.credential_ref)?.to_string(),
+            );
+        }
         Action::Scan => app.scan()?,
         Action::Start => app.start_all()?,
         Action::Stop => app.stop_all()?,
@@ -101,18 +165,77 @@ fn apply(app: &mut Application, action: Action) -> Result<Response> {
             let site = app.site(&site_id)?;
             crate::tools::terminal(&app.store, &app.home, &site)?;
         }
-        Action::Dns => {
+        Action::Dns => app.setup_dns(false)?,
+        Action::RemoveDns => app.setup_dns(true)?,
+        Action::HostsFallback => {
             let hosts = app
                 .sites()?
                 .into_iter()
                 .filter(|s| s.present && s.issue.is_none())
                 .map(|s| s.hostname)
                 .collect::<Vec<_>>();
-            crate::dns::LocalDns.reconcile(&hosts)?;
+            crate::dns::HostsFallback.reconcile(&hosts)?;
+        }
+        Action::PrepareCa => crate::setup::prepare_ca(&app.store, &app.home)?,
+        Action::FinishSetup { skip } => {
+            if !skip && !app.dns_owned() {
+                return crate::core::fail(
+                    "The managed DNS resolver is not running; retry DNS Setup before finishing",
+                );
+            }
+            crate::setup::finish(&app.store, &app.home, skip)?;
+            app.start_all()?;
+        }
+        Action::ReopenSetup => app.store.set_setting("setup.completed", "false")?,
+        Action::RemoteCatalog { url, sha256 } => {
+            crate::catalog::refresh_source(
+                &app.store,
+                crate::catalog::Source::Remote {
+                    url: &url,
+                    sha256: &sha256,
+                },
+            )?;
+            app.store.set_setting("catalog.remote.url", &url)?;
+            app.store.set_setting("catalog.remote.sha256", &sha256)?;
+        }
+        Action::Database { runtime, operation } => {
+            if runtime.kind != RuntimeType::Mysql {
+                return crate::core::fail("Only MySQL is supported");
+            }
+            let item = runtime::find(&app.store, &runtime)?;
+            use crate::database::DatabaseEngine;
+            match operation.as_str() {
+                "initialize" => crate::database::Mysql.initialize(&app.store, &app.home, &item)?,
+                "start" => {
+                    crate::database::start(&app.store, &app.home, &mut app.supervisor, &item)?
+                }
+                "stop" => app.supervisor.stop(&app.store, &item.id)?,
+                "restart" => {
+                    app.supervisor.stop(&app.store, &item.id)?;
+                    crate::database::start(&app.store, &app.home, &mut app.supervisor, &item)?;
+                }
+                "validate" => {
+                    message = Some(runtime::validate_at(&item.manifest, &item.root(&app.home))?);
+                }
+                _ => return crate::core::fail("Unknown database action"),
+            }
         }
         Action::Trust => crate::tls::CaddyTls.trust(&app.store, &app.home)?,
         Action::RefreshCatalog => {
-            crate::catalog::refresh(&app.store, &app.home.path("config/runtime-catalog.json"))?;
+            if let (Some(url), Some(sha256)) = (
+                app.store.setting("catalog.remote.url")?,
+                app.store.setting("catalog.remote.sha256")?,
+            ) {
+                crate::catalog::refresh_source(
+                    &app.store,
+                    crate::catalog::Source::Remote {
+                        url: &url,
+                        sha256: &sha256,
+                    },
+                )?;
+            } else {
+                crate::catalog::refresh(&app.store, &app.home.path("config/runtime-catalog.json"))?;
+            }
         }
         Action::Validate { runtime } => {
             let item = runtime::find(&app.store, &runtime)?;
@@ -196,4 +319,9 @@ pub async fn read_log(
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn install_progress() -> Option<runtime::InstallProgress> {
+    runtime::progress()
 }

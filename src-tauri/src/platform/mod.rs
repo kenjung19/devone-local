@@ -56,6 +56,17 @@ impl Ownership {
     pub fn new() -> Result<Self> {
         Ok(Self(native::Ownership::new()?))
     }
+    pub fn owns_tcp_listener(&self, port: u16) -> bool {
+        #[cfg(windows)]
+        {
+            self.0.owns_tcp_listener(port)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = port;
+            false
+        }
+    }
     pub fn attach(&self, child: &Child) -> Result<()> {
         self.0.attach(child)
     }
@@ -69,4 +80,137 @@ pub fn validate_local_host(host: &str) -> Result<()> {
         return fail("Invalid managed hostname");
     }
     Ok(())
+}
+
+#[cfg(windows)]
+mod wildcard;
+pub fn wildcard_ready() -> bool {
+    #[cfg(windows)]
+    {
+        wildcard::ready()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+pub fn setup_wildcard(remove: bool) -> Result<()> {
+    #[cfg(windows)]
+    {
+        wildcard::elevate(remove)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = remove;
+        fail("Wildcard DNS setup is currently supported on Windows")
+    }
+}
+pub fn helper_dispatch() -> Option<Result<()>> {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.len() != 1 {
+        return None;
+    }
+    match args[0].as_str() {
+        "--devone-setup-dns" | "--devone-remove-dns" => {
+            #[cfg(windows)]
+            {
+                Some(wildcard::configure(args[0] == "--devone-remove-dns"))
+            }
+            #[cfg(not(windows))]
+            {
+                Some(fail("Windows helper is unavailable"))
+            }
+        }
+        _ => None,
+    }
+}
+
+pub fn ca_trusted(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        windows::ca_trusted(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+pub fn protect_secret(bytes: &[u8]) -> Result<Vec<u8>> {
+    #[cfg(windows)]
+    {
+        windows::crypt_secret(bytes, false)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = bytes;
+        fail("Secure credential storage is not implemented on this platform")
+    }
+}
+pub fn unprotect_secret(bytes: &[u8]) -> Result<Vec<u8>> {
+    #[cfg(windows)]
+    {
+        windows::crypt_secret(bytes, true)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = bytes;
+        fail("Secure credential storage is not implemented on this platform")
+    }
+}
+
+pub fn wildcard_system_ready() -> bool {
+    if !wildcard_ready() || crate::dns::server::probe(53).is_err() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        windows::wildcard_system_ready()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+pub fn binary_roles(kind: &crate::core::RuntimeType) -> BTreeMap<String, String> {
+    let suffix = if cfg!(windows) { ".exe" } else { "" };
+    let pairs: &[(&str, &str)] = match kind {
+        crate::core::RuntimeType::Php => &[("cli", "php"), ("fastcgi", "php-cgi")],
+        crate::core::RuntimeType::Mysql => &[
+            ("server", "bin/mysqld"),
+            ("admin", "bin/mysqladmin"),
+            ("client", "bin/mysql"),
+        ],
+        _ => &[("server", "caddy")],
+    };
+    pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), format!("{v}{suffix}")))
+        .collect()
+}
+
+pub fn system_executable(name: &str) -> Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        windows::system_executable(name)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = name;
+        fail("System executable resolution is not implemented for this platform")
+    }
+}
+
+pub fn owns_tcp_listener(pid: u32, port: u16) -> bool {
+    #[cfg(windows)]
+    {
+        windows::owns_tcp_listener(pid, port)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (pid, port);
+        false
+    }
 }

@@ -11,6 +11,7 @@ use std::{
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
+#[derive(Clone)]
 pub struct Spec {
     pub key: String,
     pub binary: PathBuf,
@@ -26,9 +27,17 @@ struct Owned {
     spec: Spec,
     _ownership: platform::Ownership,
 }
+struct Recovery {
+    spec: Spec,
+    attempts: u32,
+    due: Option<Instant>,
+    blocked: bool,
+}
 #[derive(Default)]
 pub struct Supervisor {
     children: HashMap<String, Owned>,
+    recovery: HashMap<String, Recovery>,
+    logs: HashMap<String, PathBuf>,
 }
 impl Supervisor {
     pub fn start(&mut self, store: &Store, spec: Spec) -> Result<()> {
@@ -36,6 +45,27 @@ impl Supervisor {
         if self.children.contains_key(&spec.key) {
             return Ok(());
         }
+        if let Some(recovery) = self.recovery.get(&spec.key)
+            && (recovery.blocked || recovery.due.is_some())
+        {
+            return fail(format!(
+                "{} is awaiting recovery or exhausted its restart budget; use Restart",
+                spec.key
+            ));
+        }
+        self.logs.insert(spec.key.clone(), spec.log.clone());
+        self.recovery.insert(
+            spec.key.clone(),
+            Recovery {
+                spec: spec.clone(),
+                attempts: 0,
+                due: None,
+                blocked: false,
+            },
+        );
+        self.spawn_owned(store, spec)
+    }
+    fn spawn_owned(&mut self, store: &Store, spec: Spec) -> Result<()> {
         let log = OpenOptions::new()
             .create(true)
             .append(true)
@@ -79,7 +109,9 @@ impl Supervisor {
             let Some(p) = self.children.get(key) else {
                 return fail(format!("{key} exited; inspect its log"));
             };
-            if p.spec.port.is_none_or(PortManager::healthy) {
+            if p.spec.port.is_none_or(|port| {
+                PortManager::healthy(port) && p._ownership.owns_tcp_listener(port)
+            }) {
                 store.conn.execute(
                     "UPDATE process_state SET status='running' WHERE service_key=?1",
                     [key],
@@ -106,6 +138,58 @@ impl Supervisor {
                 self.children.remove(&key);
                 store.conn.execute("UPDATE process_state SET pid=NULL,status='exited',updated_at=?2 WHERE service_key=?1",rusqlite::params![key,timestamp()])?;
                 tracing::warn!(service=%key,exit=%status,"process exited");
+                if let Some(r) = self.recovery.get_mut(&key) {
+                    use std::io::Write;
+                    if let Ok(mut log) = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&r.spec.log)
+                    {
+                        let _ = writeln!(
+                            log,
+                            "[DEVONE] Unexpected exit {status}; restart attempt {}/3",
+                            r.attempts + 1
+                        );
+                    }
+                    if r.attempts < 3 {
+                        r.due = Some(Instant::now() + Duration::from_secs(1u64 << r.attempts));
+                    } else {
+                        r.blocked = true;
+                        r.due = None;
+                    }
+                }
+            }
+        }
+        let due = self
+            .recovery
+            .iter()
+            .filter(|(_, r)| r.due.is_some_and(|d| Instant::now() >= d))
+            .map(|(k, r)| (k.clone(), r.spec.clone()))
+            .collect::<Vec<_>>();
+        for (key, spec) in due {
+            let r = self.recovery.get_mut(&key).expect("recovery");
+            r.attempts += 1;
+            r.due = None;
+            let restart = (|| {
+                if let Some(port) = spec.port {
+                    let reserve =
+                        std::net::TcpListener::bind(("127.0.0.1", port)).map_err(|e| {
+                            crate::core::Error::Message(format!(
+                                "Restart port {port} conflict: {e}"
+                            ))
+                        })?;
+                    drop(reserve);
+                }
+                self.spawn_owned(store, spec.clone())
+            })();
+            if let Err(e) = restart {
+                tracing::error!(service=%key,error=%e,"restart failed");
+                let r = self.recovery.get_mut(&key).expect("recovery");
+                if r.attempts < 3 {
+                    r.due = Some(Instant::now() + Duration::from_secs(1u64 << r.attempts));
+                } else {
+                    r.blocked = true;
+                }
             }
         }
         Ok(())
@@ -126,19 +210,34 @@ impl Supervisor {
             let (key, pid, status) = row?;
             let child = self.children.get(&key);
             let port = child.and_then(|c| c.spec.port);
-            let healthy = child.is_some() && port.is_none_or(PortManager::healthy);
+            let healthy = child.is_some_and(|p| {
+                port.is_none_or(|port| {
+                    PortManager::healthy(port) && p._ownership.owns_tcp_listener(port)
+                })
+            });
+            let actual = if child.is_some() {
+                if healthy { "running" } else { "unhealthy" }
+            } else if self.recovery.get(&key).is_some_and(|r| r.blocked) {
+                "restart limit reached"
+            } else {
+                status.as_str()
+            };
+            if actual != status {
+                store.conn.execute(
+                    "UPDATE process_state SET status=?2,updated_at=?3 WHERE service_key=?1",
+                    rusqlite::params![key, actual, timestamp()],
+                )?;
+                tracing::info!(service=%key,status=actual,"health transition");
+            }
             Ok(ServiceState {
-                key,
+                key: key.clone(),
                 pid,
-                status: if child.is_some() && !healthy {
-                    "unhealthy".into()
-                } else {
-                    status
-                },
+                status: actual.into(),
                 port,
                 healthy,
                 log: child
                     .map(|p| p.spec.log.to_string_lossy().into())
+                    .or_else(|| self.logs.get(&key).map(|p| p.to_string_lossy().into()))
                     .unwrap_or_default(),
             })
         })
@@ -148,9 +247,23 @@ impl Supervisor {
         self.children.contains_key(key)
     }
     pub fn stop(&mut self, store: &Store, key: &str) -> Result<()> {
+        self.recovery.remove(key);
         if let Some(mut p) = self.children.remove(key) {
-            if let Some((bin, args)) = &p.spec.graceful {
-                let _ = run_checked(bin, args, &p.spec.cwd, &p.spec.env, Duration::from_secs(5));
+            if p.spec.graceful.is_some() && p.child.try_wait()?.is_none() {
+                let result = if let Some(port) = p.spec.port {
+                    if key.starts_with("mysql:") {
+                        crate::database::provision::shutdown_owned(port, &p._ownership)
+                    } else if key.starts_with("caddy:") {
+                        stop_caddy_owned(port, p.child.id())
+                    } else {
+                        Ok(())
+                    }
+                } else {
+                    Ok(())
+                };
+                if let Err(e) = result {
+                    tracing::warn!(service=%key,error=%e,"graceful shutdown skipped/failed; terminating owned child");
+                }
                 let deadline = Instant::now() + Duration::from_secs(5);
                 while Instant::now() < deadline && p.child.try_wait()?.is_none() {
                     std::thread::sleep(Duration::from_millis(100));
@@ -169,7 +282,14 @@ impl Supervisor {
         Ok(())
     }
     pub fn stop_all(&mut self, store: &Store) -> Result<()> {
-        let mut keys: Vec<_> = self.children.keys().cloned().collect();
+        let mut keys: Vec<_> = self
+            .recovery
+            .keys()
+            .chain(self.children.keys())
+            .cloned()
+            .collect();
+        keys.sort();
+        keys.dedup();
         keys.sort_by_key(|k| {
             if k.starts_with("caddy") {
                 0
@@ -192,6 +312,18 @@ impl Drop for Supervisor {
             let _ = p.child.wait();
         }
     }
+}
+
+fn stop_caddy_owned(port: u16, pid: u32) -> Result<()> {
+    use std::io::Write;
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = std::net::TcpStream::connect_timeout(&address, Duration::from_secs(2))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    if !platform::owns_tcp_listener(pid, port) {
+        return fail("Caddy listener is not owned; no stop request sent");
+    }
+    stream.write_all(format!("POST /stop HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes())?;
+    Ok(())
 }
 pub fn run_checked(
     binary: &std::path::Path,

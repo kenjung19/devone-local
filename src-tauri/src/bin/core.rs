@@ -21,6 +21,13 @@ fn kind(value: &str) -> RuntimeType {
     }
 }
 fn main() {
+    if let Some(result) = devone::platform::helper_dispatch() {
+        if let Err(e) = result {
+            eprintln!("{e}");
+            std::process::exit(1)
+        }
+        return;
+    }
     if let Err(e) = run() {
         eprintln!("{e}");
         std::process::exit(1);

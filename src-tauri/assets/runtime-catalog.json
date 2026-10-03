@@ -1,0 +1,82 @@
+{
+    "schema_version":  1,
+    "revision":  2026100301,
+    "manifests":  [
+                      {
+                          "version":  "8.3.35",
+                          "download":  "https://windows.php.net/downloads/releases/php-8.3.35-nts-Win32-vs16-x64.zip",
+                          "binaries":  {
+                                           "fastcgi":  "php-cgi.exe",
+                                           "cli":  "php.exe"
+                                       },
+                          "sha256":  "25a8e2ac9ff30f1d768d1447c09a600617fa6e6082729f6e95f008b59c91fe45",
+                          "metadata":  {
+                                           "channel":  "stable",
+                                           "source":  "windows.php.net"
+                                       },
+                          "platform":  "windows-x64",
+                          "runtime":  "php"
+                      },
+                      {
+                          "version":  "8.4.26",
+                          "download":  "https://windows.php.net/downloads/releases/php-8.4.26-nts-Win32-vs17-x64.zip",
+                          "binaries":  {
+                                           "fastcgi":  "php-cgi.exe",
+                                           "cli":  "php.exe"
+                                       },
+                          "sha256":  "da68394f9193b7f6b89d0c76861a4034ae10efee7fd55a7255d8118c2acf70d7",
+                          "metadata":  {
+                                           "channel":  "stable",
+                                           "source":  "windows.php.net"
+                                       },
+                          "platform":  "windows-x64",
+                          "runtime":  "php"
+                      },
+                      {
+                          "version":  "8.5.11",
+                          "download":  "https://windows.php.net/downloads/releases/php-8.5.11-nts-Win32-vs17-x64.zip",
+                          "binaries":  {
+                                           "fastcgi":  "php-cgi.exe",
+                                           "cli":  "php.exe"
+                                       },
+                          "sha256":  "0ea96e0d2b9b737a6036f05cf4e95c49313faa6d0f27bd97edb2742503f0c043",
+                          "metadata":  {
+                                           "channel":  "stable",
+                                           "source":  "windows.php.net"
+                                       },
+                          "platform":  "windows-x64",
+                          "runtime":  "php"
+                      },
+                      {
+                          "version":  "2.11.7",
+                          "download":  "https://github.com/caddyserver/caddy/releases/download/v2.11.7/caddy_2.11.7_windows_amd64.zip",
+                          "binaries":  {
+                                           "server":  "caddy.exe"
+                                       },
+                          "sha256":  "0a1edc0b799512051c57071ce0e798d3f2cf67dc98171366f1d2b326072e3b06",
+                          "metadata":  {
+                                           "source":  "caddyserver/caddy"
+                                       },
+                          "platform":  "windows-x64",
+                          "runtime":  "caddy"
+                      },
+                      {
+                          "version":  "8.4.11",
+                          "download":  "https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.11-winx64.zip",
+                          "binaries":  {
+                                           "admin":  "bin/mysqladmin.exe",
+                                           "server":  "bin/mysqld.exe",
+                                           "client":  "bin/mysql.exe"
+                                       },
+                          "sha256":  "a492371d687d2bab088b0062581144a0044b8964baefdf4faa579292b423d25c",
+                          "metadata":  {
+                                           "channel":  "LTS",
+                                           "vendor_md5":  "2e833921898a9a030ea6bfe81bd811bc",
+                                           "source":  "Oracle MySQL",
+                                           "archive_root":  "mysql-8.4.11-winx64"
+                                       },
+                          "platform":  "windows-x64",
+                          "runtime":  "mysql"
+                      }
+                  ]
+}

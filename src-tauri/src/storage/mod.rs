@@ -11,7 +11,7 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 1 {
+        if version > 2 {
             return fail("State was created by a newer DEVONE release");
         }
         if version == 0 {
@@ -19,6 +19,13 @@ impl Store {
                 "BEGIN IMMEDIATE;",
                 include_str!("../../migrations/001_foundation.sql"),
                 "PRAGMA user_version=1; COMMIT;"
+            ))?;
+        }
+        if version < 2 {
+            conn.execute_batch(concat!(
+                "BEGIN IMMEDIATE;",
+                include_str!("../../migrations/002_project_databases.sql"),
+                "PRAGMA user_version=2; COMMIT;"
             ))?;
         }
         // No stale PID is adopted or killed: Windows Job Objects clean up owned children.
@@ -54,6 +61,6 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 1);
+        assert_eq!(v, 2);
     }
 }

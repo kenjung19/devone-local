@@ -109,6 +109,20 @@ pub fn override_site(
     if !exists {
         return fail("Unknown site");
     }
+    if *kind == RuntimeType::Mysql
+        && let Some(binding) = crate::database::provision::bindings(store)?
+            .into_iter()
+            .find(|b| b.site_id == site_id)
+    {
+        let requested = version
+            .map(str::to_string)
+            .or(store.setting("default.mysql")?);
+        if requested.as_deref() != Some(binding.runtime_id.trim_start_matches("mysql:")) {
+            return fail(
+                "This project's database is bound to an exact MySQL version; automatic migration is not supported",
+            );
+        }
+    }
     if let Some(version) = version {
         find(
             store,
@@ -193,6 +207,12 @@ pub fn import(
     source: &Path,
 ) -> Result<Installation> {
     manifest.validate()?;
+    if !matches!(
+        manifest.runtime,
+        RuntimeType::Php | RuntimeType::Mysql | RuntimeType::Caddy
+    ) {
+        return fail("Runtime execution for this kind is planned beyond Phase 1");
+    }
     let id = format!("{}:{}", manifest.runtime.key(), manifest.version);
     if installed(store)?.iter().any(|i| i.id == id) {
         return fail("This runtime is already installed");
@@ -210,12 +230,25 @@ pub fn import(
         .path("cache")
         .join(format!("import-{}", uuid::Uuid::new_v4()));
     let result = (|| {
-        copy_tree(&source, &staging)?;
-        validate_at(&manifest, &staging)?;
+        copy_tree(&source, &staging).map_err(|e| {
+            crate::core::Error::Message(format!("Runtime import copy {}: {e}", source.display()))
+        })?;
+        validate_at(&manifest, &staging).map_err(|e| {
+            crate::core::Error::Message(format!(
+                "Runtime import validation {}: {e}",
+                staging.display()
+            ))
+        })?;
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::rename(&staging, &target)?;
+        std::fs::rename(&staging, &target).map_err(|e| {
+            crate::core::Error::Message(format!(
+                "Runtime import move {} to {}: {e}",
+                staging.display(),
+                target.display()
+            ))
+        })?;
         let relative_path = format!("runtimes/{}/{}", manifest.runtime.key(), manifest.version);
         let installation = Installation {
             id: id.clone(),
@@ -231,8 +264,45 @@ pub fn import(
     }
     result
 }
+#[derive(Clone, Serialize, Default)]
+pub struct InstallProgress {
+    pub runtime: String,
+    pub phase: String,
+    pub bytes: u64,
+    pub total: Option<u64>,
+    pub error: Option<String>,
+}
+static PROGRESS: std::sync::Mutex<Option<InstallProgress>> = std::sync::Mutex::new(None);
+pub fn progress() -> Option<InstallProgress> {
+    PROGRESS.lock().ok().and_then(|p| p.clone())
+}
+fn update_progress(phase: &str, bytes: u64, total: Option<u64>) {
+    if let Ok(mut p) = PROGRESS.lock()
+        && let Some(p) = p.as_mut()
+    {
+        p.phase = phase.into();
+        p.bytes = bytes;
+        p.total = total;
+    }
+}
 pub fn install(store: &Store, home: &Home, reference: &RuntimeRef) -> Result<Installation> {
-    use sha2::{Digest, Sha256};
+    if let Ok(mut p) = PROGRESS.lock() {
+        *p = Some(InstallProgress {
+            runtime: reference.key(),
+            phase: "preparing".into(),
+            ..Default::default()
+        })
+    }
+    let result = install_inner(store, home, reference);
+    if let Ok(mut p) = PROGRESS.lock()
+        && let Some(p) = p.as_mut()
+    {
+        p.phase = if result.is_ok() { "complete" } else { "failed" }.into();
+        p.error = result.as_ref().err().map(|e| e.to_string());
+    }
+    result
+}
+fn install_inner(store: &Store, home: &Home, reference: &RuntimeRef) -> Result<Installation> {
     use std::io::Read;
     let manifest = crate::catalog::available(store)?
         .into_iter()
@@ -258,26 +328,27 @@ pub fn install(store: &Store, home: &Home, reference: &RuntimeRef) -> Result<Ins
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()
         .map_err(|e| crate::core::Error::Message(e.to_string()))?;
-    let response = client
+    let mut response = client
         .get(url)
         .send()
         .and_then(|r| r.error_for_status())
         .map_err(|e| crate::core::Error::Message(e.to_string()))?;
+    let total = response.content_length();
     let mut data = Vec::new();
-    response
-        .take(512 * 1024 * 1024 + 1)
-        .read_to_end(&mut data)?;
-    if data.len() > 512 * 1024 * 1024 {
-        return fail("Runtime archive exceeds 512 MiB");
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let n = response.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        if data.len() + n > 512 * 1024 * 1024 {
+            return fail("Runtime archive exceeds 512 MiB");
+        }
+        data.extend_from_slice(&buffer[..n]);
+        update_progress("downloading", data.len() as u64, total);
     }
-    if Sha256::digest(&data)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>()
-        != checksum.to_ascii_lowercase()
-    {
-        return fail("Runtime checksum mismatch; archive rejected");
-    }
+    update_progress("verifying", data.len() as u64, total);
+    verify_archive_checksum(&data, checksum)?;
     let staging = home
         .path("cache")
         .join(format!("download-{}", uuid::Uuid::new_v4()));
@@ -285,6 +356,7 @@ pub fn install(store: &Store, home: &Home, reference: &RuntimeRef) -> Result<Ins
     let result = (|| {
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(data))
             .map_err(|e| crate::core::Error::Message(e.to_string()))?;
+        update_progress("extracting", 0, Some(archive.len() as u64));
         let mut total = 0_u64;
         for i in 0..archive.len() {
             let mut file = archive
@@ -315,10 +387,24 @@ pub fn install(store: &Store, home: &Home, reference: &RuntimeRef) -> Result<Ins
                 std::io::copy(&mut file, &mut output)?;
             }
         }
-        import(store, home, manifest, &staging)
+        update_progress("validating", 0, None);
+        let source = if let Some(root) = manifest.metadata.get("archive_root") {
+            staging.join(root)
+        } else {
+            staging.clone()
+        };
+        import(store, home, manifest, &source)
     })();
     let _ = std::fs::remove_dir_all(&staging);
     result
+}
+pub fn verify_archive_checksum(data: &[u8], checksum: &str) -> Result<()> {
+    if !crate::catalog::valid_hash(checksum)
+        || crate::catalog::digest(data) != checksum.to_ascii_lowercase()
+    {
+        return fail("Runtime checksum mismatch; archive rejected");
+    }
+    Ok(())
 }
 pub fn remove(store: &Store, home: &Home, reference: &RuntimeRef) -> Result<()> {
     let runtime = find(store, reference)?;
@@ -376,11 +462,84 @@ pub struct PhpConfig {
     pub extensions: Vec<String>,
 }
 pub fn php_config(home: &Home, version: &str) -> Result<PhpConfig> {
+    if !crate::catalog::safe_segment(version) {
+        return fail("Invalid PHP version");
+    }
     let path = home.path("config").join(format!("php-{version}.json"));
     if !path.exists() {
-        return Ok(PhpConfig::default());
+        if !crate::catalog::safe_segment(version) {
+            return fail("Invalid PHP version");
+        }
+        let original = home.runtime("php", version).join("php.ini");
+        let text = std::fs::read_to_string(original).unwrap_or_default();
+        let mut config = PhpConfig::default();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.starts_with(';') {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once('=') {
+                let key = key.trim();
+                let value = value
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_matches(['"', '\'']);
+                if [
+                    "memory_limit",
+                    "upload_max_filesize",
+                    "post_max_size",
+                    "max_execution_time",
+                    "date.timezone",
+                    "display_errors",
+                    "error_reporting",
+                ]
+                .contains(&key)
+                    && !value.is_empty()
+                {
+                    config.directives.insert(key.into(), value.into());
+                }
+                if ["extension", "zend_extension"].contains(&key) {
+                    let name = value.rsplit(['\\', '/']).next().unwrap_or(value);
+                    if crate::catalog::safe_segment(name) {
+                        config.extensions.push(name.to_string());
+                    }
+                }
+            }
+        }
+        return Ok(config);
     }
     Ok(serde_json::from_slice(&std::fs::read(path)?)?)
+}
+#[derive(Serialize)]
+pub struct PhpSettings {
+    pub config: PhpConfig,
+    pub available_extensions: Vec<String>,
+    pub original_ini: bool,
+}
+pub fn php_settings(home: &Home, runtime: &Installation) -> Result<PhpSettings> {
+    let dir = runtime.root(home).join("ext");
+    let mut available = Vec::new();
+    if dir.is_dir() {
+        for item in std::fs::read_dir(dir)? {
+            let item = item?;
+            if item.file_type()?.is_file() && !crate::platform::is_link(&item.path())? {
+                let name = item.file_name().to_string_lossy().to_string();
+                if (cfg!(windows) && name.starts_with("php_") && name.ends_with(".dll"))
+                    || (!cfg!(windows) && name.ends_with(".so"))
+                {
+                    available.push(name)
+                }
+            }
+        }
+    }
+    available.sort();
+    Ok(PhpSettings {
+        config: php_config(home, &runtime.manifest.version)?,
+        available_extensions: available,
+        original_ini: runtime.root(home).join("php.ini").is_file(),
+    })
 }
 pub fn write_php_config(
     home: &Home,
@@ -390,49 +549,217 @@ pub fn write_php_config(
     if runtime.manifest.runtime != RuntimeType::Php {
         return fail("PHP configuration requires a PHP runtime");
     }
-    let allowed = [
-        "memory_limit",
-        "upload_max_filesize",
-        "post_max_size",
-        "max_execution_time",
-        "date.timezone",
-        "display_errors",
-        "error_reporting",
-    ];
-    for (key, value) in &config.directives {
-        if !allowed.contains(&key.as_str()) || value.contains(['\n', '\r', '"', ';']) {
-            return fail("Unsafe or unsupported PHP directive");
-        }
-    }
-    for extension in &config.extensions {
+    validate_php_directives(config)?;
+    let settings = php_settings(home, runtime)?;
+    let resolve = |extension: &str| -> Result<String> {
         if !crate::catalog::safe_segment(extension) {
             return fail("Unsafe extension name");
         }
-    }
+        let filename = if cfg!(windows) && !extension.ends_with(".dll") {
+            format!("php_{extension}.dll")
+        } else if !cfg!(windows) && !extension.ends_with(".so") {
+            format!("{extension}.so")
+        } else {
+            extension.to_string()
+        };
+        if !settings.available_extensions.contains(&filename) {
+            return fail(format!(
+                "Extension {extension} is not present in this PHP distribution"
+            ));
+        }
+        Ok(filename)
+    };
+    let extensions = config
+        .extensions
+        .iter()
+        .map(|e| resolve(e))
+        .collect::<Result<Vec<_>>>()?;
     let version = &runtime.manifest.version;
     let dir = home.path("config").join(format!("php-{version}"));
     std::fs::create_dir_all(&dir)?;
-    let root = runtime.root(home).to_string_lossy().replace('\\', "/");
-    let mut ini = format!(
-        "; DEVONE generated settings. User php.ini remains untouched.\ncgi.fix_pathinfo=1\nextension_dir=\"{root}/ext\"\n"
-    );
-    for (k, v) in &config.directives {
-        ini.push_str(&format!("{k}=\"{v}\"\n"));
-    }
-    for ext in &config.extensions {
-        ini.push_str(&format!("extension={ext}\n"));
-    }
     let path = dir.join("devone.ini");
-    std::fs::write(&path, ini)?;
-    std::fs::write(
-        home.path("config").join(format!("php-{version}.json")),
-        serde_json::to_vec_pretty(config)?,
-    )?;
-    Ok(path)
+    let marker = "; DEVONE generated settings.";
+    if path.exists() && !std::fs::read_to_string(&path)?.starts_with(marker) {
+        return fail("Existing ini is not DEVONE-managed; nothing overwritten");
+    }
+    let root = runtime.root(home).to_string_lossy().replace('\\', "/");
+    if root.contains(['\n', '\r', '"']) {
+        return fail("Unsafe PHP configuration path");
+    }
+    let mut ini = format!(
+        "{marker} User php.ini remains untouched.\ncgi.fix_pathinfo=1\nextension_dir=\"{root}/ext\"\n"
+    );
+    if let Ok(original) = std::fs::read_to_string(runtime.root(home).join("php.ini")) {
+        for line in original.lines() {
+            let key = line.split_once('=').map(|(k, _)| k.trim()).unwrap_or("");
+            if [
+                "extension",
+                "zend_extension",
+                "extension_dir",
+                "cgi.fix_pathinfo",
+            ]
+            .contains(&key)
+                || config.directives.contains_key(key)
+            {
+                continue;
+            }
+            ini.push_str(line);
+            ini.push('\n');
+        }
+    }
+    for (k, v) in &config.directives {
+        if k == "error_reporting" {
+            ini.push_str(&format!("{k}={v}\n"));
+        } else {
+            ini.push_str(&format!("{k}=\"{v}\"\n"));
+        }
+    }
+    for file in extensions {
+        let directive = if file.contains("opcache") || file.contains("xdebug") {
+            "zend_extension"
+        } else {
+            "extension"
+        };
+        ini.push_str(&format!("{directive}=\"{file}\"\n"))
+    }
+    let staging = home
+        .path("cache")
+        .join(format!("php-check-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&staging)?;
+    let result = (|| {
+        std::fs::write(staging.join("devone.ini"), &ini)?;
+        let env = BTreeMap::from([
+            ("PHP_INI_SCAN_DIR".into(), String::new()),
+            (
+                "PHPRC".into(),
+                staging.join("devone.ini").to_string_lossy().into(),
+            ),
+        ]);
+        for arg in ["-v", "--ini", "-m"] {
+            let output = crate::process::run_checked(
+                &runtime.binary(home, "cli")?,
+                &[arg.into()],
+                &runtime.root(home),
+                &env,
+                Duration::from_secs(10),
+            )?;
+            let lower = output.to_ascii_lowercase();
+            if lower.contains("php warning")
+                || lower.contains("unable to load")
+                || lower.contains("already loaded")
+                || lower.contains("fatal error")
+            {
+                return fail(format!("PHP configuration validation failed: {output}"));
+            }
+            if arg == "--ini" && !output.contains("devone.ini") {
+                return fail("PHP did not load the candidate managed ini");
+            }
+        }
+        let previous = if path.exists() {
+            Some(std::fs::read(&path)?)
+        } else {
+            None
+        };
+        let json = serde_json::to_vec_pretty(config)?;
+        atomic_write(&path, ini.as_bytes())?;
+        if let Err(e) = atomic_write(
+            &home.path("config").join(format!("php-{version}.json")),
+            &json,
+        ) {
+            if let Some(bytes) = previous {
+                atomic_write(&path, &bytes)?;
+            } else {
+                std::fs::remove_file(&path)?;
+            }
+            return Err(e);
+        }
+        Ok(path)
+    })();
+    let _ = std::fs::remove_dir_all(staging);
+    result
+}
+pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut f = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&temp, path)?;
+        Ok(())
+    })();
+    if temp.exists() {
+        let _ = std::fs::remove_file(temp);
+    }
+    result
+}
+fn validate_php_directives(config: &PhpConfig) -> Result<()> {
+    for (k, v) in &config.directives {
+        if v.is_empty() || v.contains(['\n', '\r', '"', ';', '\0']) {
+            return fail("Invalid PHP directive value");
+        }
+        let valid = match k.as_str() {
+            "memory_limit" => v == "-1" || valid_size(v),
+            "upload_max_filesize" | "post_max_size" => valid_size(v),
+            "max_execution_time" => v.parse::<u32>().is_ok(),
+            "date.timezone" => v
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_/+-".contains(&b)),
+            "display_errors" => ["0", "1", "On", "Off", "on", "off"].contains(&v.as_str()),
+            "error_reporting" => {
+                v.parse::<u32>().is_ok()
+                    || ["E_ALL", "E_ALL & ~E_DEPRECATED & ~E_STRICT"].contains(&v.as_str())
+            }
+            _ => false,
+        };
+        if !valid {
+            return fail(format!("Unsupported or invalid PHP directive: {k}"));
+        }
+    }
+    Ok(())
+}
+fn valid_size(v: &str) -> bool {
+    let digits = if v.as_bytes().last().is_some_and(|b| b"KMGkmg".contains(b)) {
+        &v[..v.len() - 1]
+    } else {
+        v
+    };
+    !digits.is_empty() && digits.parse::<u64>().is_ok()
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn archive_checksum_rejects_corruption() {
+        let data = b"trusted archive";
+        let hash = crate::catalog::digest(data);
+        assert!(verify_archive_checksum(data, &hash).is_ok());
+        assert!(verify_archive_checksum(b"corrupted archive", &hash).is_err());
+        assert!(verify_archive_checksum(data, "bad").is_err());
+    }
+    #[test]
+    fn directives_reject_injection_and_bad_values() {
+        for (k, v) in [
+            ("memory_limit", "256M"),
+            ("max_execution_time", "30"),
+            ("date.timezone", "Asia/Bangkok"),
+        ] {
+            let c = PhpConfig {
+                directives: BTreeMap::from([(k.into(), v.into())]),
+                extensions: vec![],
+            };
+            assert!(validate_php_directives(&c).is_ok())
+        }
+        let c = PhpConfig {
+            directives: BTreeMap::from([("memory_limit".into(), "256M;extension=bad".into())]),
+            extensions: vec![],
+        };
+        assert!(validate_php_directives(&c).is_err());
+    }
     #[test]
     fn overrides_win_without_mutating_defaults() {
         let mut map = BTreeMap::new();

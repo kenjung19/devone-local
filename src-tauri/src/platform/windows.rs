@@ -23,11 +23,13 @@ pub fn configure(command: &mut Command) {
     command.creation_flags(0x08000000);
 }
 pub fn open(target: &str) -> Result<()> {
-    Command::new("explorer.exe").arg(target).spawn()?;
+    Command::new(system_executable("explorer.exe")?)
+        .arg(target)
+        .spawn()?;
     Ok(())
 }
 pub fn terminal(path: &Path, env: &BTreeMap<String, String>) -> Result<()> {
-    Command::new("cmd.exe")
+    Command::new(system_executable("cmd.exe")?)
         .arg("/K")
         .current_dir(path)
         .envs(env)
@@ -121,13 +123,13 @@ pub fn sync_hosts(hosts: &[String]) -> Result<()> {
             "Local DNS setup requires an elevated DEVONE session: {e}"
         ))
     })?;
-    let mut flush = Command::new("ipconfig.exe");
+    let mut flush = Command::new(system_executable("ipconfig.exe")?);
     configure(&mut flush);
     let _ = flush.arg("/flushdns").status();
     Ok(())
 }
 pub fn trust_ca(path: &Path) -> Result<()> {
-    let mut cmd = Command::new("certutil.exe");
+    let mut cmd = Command::new(system_executable("certutil.exe")?);
     configure(&mut cmd);
     let output = cmd
         .args(["-user", "-addstore", "Root"])
@@ -162,6 +164,22 @@ impl Ownership {
             Ok(Self(handle))
         }
     }
+    pub fn owns_tcp_listener(&self, port: u16) -> bool {
+        listener_owned_by(port, |pid| unsafe {
+            use windows_sys::Win32::System::{
+                JobObjects::IsProcessInJob,
+                Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+            };
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if process.is_null() {
+                return false;
+            }
+            let mut member = 0;
+            let valid = IsProcessInJob(process, self.0, &mut member) != 0 && member != 0;
+            CloseHandle(process);
+            valid
+        })
+    }
     pub fn attach(&self, child: &Child) -> Result<()> {
         if unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle() as HANDLE) } == 0 {
             return Err(std::io::Error::last_os_error().into());
@@ -174,5 +192,243 @@ impl Drop for Ownership {
         unsafe {
             CloseHandle(self.0);
         }
+    }
+}
+
+pub fn ca_trusted(path: &Path) -> bool {
+    use windows_sys::Win32::Security::Cryptography::*;
+    if !path.is_file() {
+        return false;
+    }
+    let wide = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    unsafe {
+        let mut context: *mut std::ffi::c_void = std::ptr::null_mut();
+        if CryptQueryObject(
+            CERT_QUERY_OBJECT_FILE,
+            wide.as_ptr() as *const _,
+            CERT_QUERY_CONTENT_FLAG_CERT,
+            CERT_QUERY_FORMAT_FLAG_ALL,
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut context,
+        ) == 0
+        {
+            return false;
+        }
+        let name: Vec<u16> = "ROOT".encode_utf16().chain(Some(0)).collect();
+        let store = CertOpenStore(
+            CERT_STORE_PROV_SYSTEM_W,
+            0,
+            0,
+            CERT_SYSTEM_STORE_CURRENT_USER | CERT_STORE_READONLY_FLAG,
+            name.as_ptr() as *const _,
+        );
+        if store.is_null() {
+            CertFreeCertificateContext(context as *const CERT_CONTEXT);
+            return false;
+        }
+        let found = CertFindCertificateInStore(
+            store,
+            X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+            0,
+            CERT_FIND_EXISTING,
+            context,
+            std::ptr::null(),
+        );
+        let trusted = !found.is_null();
+        if trusted {
+            CertFreeCertificateContext(found);
+        }
+        CertCloseStore(store, 0);
+        CertFreeCertificateContext(context as *const CERT_CONTEXT);
+        trusted
+    }
+}
+
+pub fn crypt_secret(bytes: &[u8], decrypt: bool) -> Result<Vec<u8>> {
+    use windows_sys::Win32::{Foundation::LocalFree, Security::Cryptography::*};
+    unsafe {
+        let input = CRYPT_INTEGER_BLOB {
+            cbData: bytes.len() as u32,
+            pbData: bytes.as_ptr() as *mut u8,
+        };
+        let mut output: CRYPT_INTEGER_BLOB = std::mem::zeroed();
+        let ok = if decrypt {
+            CryptUnprotectData(
+                &input,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output,
+            )
+        } else {
+            CryptProtectData(
+                &input,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let data = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+        std::slice::from_raw_parts_mut(output.pbData, output.cbData as usize).fill(0);
+        LocalFree(output.pbData as *mut _);
+        Ok(data)
+    }
+}
+pub fn wildcard_system_ready() -> bool {
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    static HEALTH: OnceLock<Arc<Mutex<(bool, Instant, bool)>>> = OnceLock::new();
+    let cache = HEALTH
+        .get_or_init(|| {
+            Arc::new(Mutex::new((
+                false,
+                Instant::now() - Duration::from_secs(30),
+                false,
+            )))
+        })
+        .clone();
+    let Ok(mut state) = cache.lock() else {
+        return false;
+    };
+    let ready = state.0;
+    if !state.2 && state.1.elapsed() > Duration::from_secs(10) {
+        state.2 = true;
+        let target = cache.clone();
+        std::thread::spawn(move || {
+            use windows_sys::Win32::NetworkManagement::Dns::*;
+            let name = format!("devone-health-{}.test", uuid::Uuid::new_v4().simple())
+                .encode_utf16()
+                .chain(Some(0))
+                .collect::<Vec<_>>();
+            let ok = unsafe {
+                let mut records = std::ptr::null_mut();
+                let result = DnsQuery_W(
+                    name.as_ptr(),
+                    DNS_TYPE_A,
+                    DNS_QUERY_BYPASS_CACHE | DNS_QUERY_NO_HOSTS_FILE,
+                    std::ptr::null_mut(),
+                    &mut records,
+                    std::ptr::null_mut(),
+                );
+                let mut p = records;
+                let mut found = false;
+                while !p.is_null() {
+                    if (*p).wType == DNS_TYPE_A
+                        && (*p).Data.A.IpAddress.to_ne_bytes() == [127, 0, 0, 1]
+                    {
+                        found = true;
+                    }
+                    p = (*p).pNext;
+                }
+                if !records.is_null() {
+                    DnsFree(records as *const _, DnsFreeRecordList);
+                }
+                result == 0 && found
+            };
+            if let Ok(mut s) = target.lock() {
+                *s = (ok, Instant::now(), false);
+            }
+        });
+    }
+    ready
+}
+
+pub fn system_executable(name: &str) -> Result<PathBuf> {
+    use windows_sys::Win32::System::SystemInformation::{
+        GetSystemDirectoryW, GetWindowsDirectoryW,
+    };
+    if !crate::catalog::safe_segment(name) {
+        return fail("Invalid system executable name");
+    }
+    let mut buffer = [0u16; 32768];
+    let length = unsafe {
+        if name.eq_ignore_ascii_case("explorer.exe") {
+            GetWindowsDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32)
+        } else {
+            GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32)
+        }
+    } as usize;
+    if length == 0 || length >= buffer.len() {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(PathBuf::from(String::from_utf16_lossy(&buffer[..length])).join(name))
+}
+
+pub fn owns_tcp_listener(pid: u32, port: u16) -> bool {
+    listener_owned_by(port, |owner| owner == pid)
+}
+fn listener_owned_by(port: u16, owns: impl Fn(u32) -> bool) -> bool {
+    use windows_sys::Win32::NetworkManagement::IpHelper::*;
+    unsafe {
+        let mut size = 0u32;
+        GetExtendedTcpTable(
+            std::ptr::null_mut(),
+            &mut size,
+            0,
+            2,
+            TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        );
+        if !(4..=16 * 1024 * 1024).contains(&size) {
+            return false;
+        }
+        let mut buffer = vec![0u32; (size as usize).div_ceil(4)];
+        if GetExtendedTcpTable(
+            buffer.as_mut_ptr() as *mut _,
+            &mut size,
+            0,
+            2,
+            TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        ) != 0
+        {
+            return false;
+        }
+        let count = buffer[0] as usize;
+        let stride = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
+        if 4 + count * stride > size as usize {
+            return false;
+        }
+        let rows = buffer.as_ptr().add(1) as *const MIB_TCPROW_OWNER_PID;
+        (0..count).any(|i| {
+            let row = &*rows.add(i);
+            owns(row.dwOwningPid)
+                && u16::from_be(row.dwLocalPort as u16) == port
+                && (row.dwLocalAddr == 0 || row.dwLocalAddr.to_ne_bytes() == [127, 0, 0, 1])
+        })
+    }
+}
+#[cfg(test)]
+mod secret_tests {
+    #[test]
+    fn listener_ownership() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(super::owns_tcp_listener(std::process::id(), port));
+        assert!(!super::owns_tcp_listener(u32::MAX, port));
+    }
+    #[test]
+    fn dpapi_roundtrip() {
+        let plain = b"development-secret";
+        let encrypted = super::crypt_secret(plain, false).unwrap();
+        assert!(!encrypted.windows(plain.len()).any(|b| b == plain));
+        assert_eq!(super::crypt_secret(&encrypted, true).unwrap(), plain);
     }
 }
