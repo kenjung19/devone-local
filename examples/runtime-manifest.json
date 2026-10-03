@@ -1,0 +1,12 @@
+{
+  "runtime": "php",
+  "version": "REPLACE_WITH_EXACT_VERSION",
+  "platform": "windows-x64",
+  "binaries": {
+    "cli": "php.exe",
+    "fastcgi": "php-cgi.exe"
+  },
+  "download": null,
+  "sha256": null,
+  "metadata": {}
+}

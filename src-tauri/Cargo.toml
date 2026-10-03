@@ -1,0 +1,51 @@
+[package]
+name = "devone-local"
+version = "0.1.0"
+edition = "2024"
+default-run = "devone-local"
+[lib]
+name = "devone"
+crate-type = ["staticlib", "cdylib", "rlib"]
+[features]
+default = ["desktop"]
+desktop = ["dep:tauri", "dep:tauri-build"]
+[build-dependencies]
+tauri-build = { version = "2", features = [], optional = true }
+[dependencies]
+tauri = { version = "2", features = [], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+thiserror = "2"
+notify = "8"
+ctrlc = "3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.11"
+reqwest = { version = "0.13", features = ["blocking", "rustls"], default-features = false }
+zip = { version = "8", default-features = false, features = ["deflate"] }
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+[dev-dependencies]
+tempfile = "3"
+[[bin]]
+name = "devone-local"
+path = "src/main.rs"
+required-features = ["desktop"]
+[[bin]]
+name = "devone-core"
+path = "src/bin/core.rs"
+
+
+
+[profile.dev]
+debug = 0
+[profile.test]
+debug = 0
+
+
+[[bin]]
+name = "devone-process-fixture"
+path = "tests/fixtures/process.rs"
+test = false
