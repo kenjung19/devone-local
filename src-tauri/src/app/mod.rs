@@ -35,6 +35,8 @@ pub struct Snapshot {
     pub project_databases: Vec<crate::database::provision::Binding>,
     pub setup: crate::setup::State,
     pub php_settings: BTreeMap<String, crate::runtime::PhpSettings>,
+    pub startup: crate::platform::startup::State,
+    pub environment_autostart: bool,
 }
 #[derive(Clone, Copy)]
 pub struct Options {
@@ -206,8 +208,31 @@ impl Application {
     pub fn dns_owned(&self) -> bool {
         self._dns.as_ref().is_some_and(|r| r.healthy())
     }
+    pub fn recreate_ca(&mut self, confirmed: bool) -> Result<()> {
+        if !confirmed {
+            return fail("Confirm CA recreation first");
+        }
+        for item in runtime::installed(&self.store)?
+            .into_iter()
+            .filter(|r| r.manifest.runtime == RuntimeType::Caddy)
+        {
+            self.supervisor.stop(&self.store, &item.id)?;
+        }
+        self.routed.clear();
+        let result = crate::tls::recreate(&self.store, &self.home, confirmed);
+        if self.active
+            && let Err(e) = self.start_required()
+        {
+            self.issues.push(format!("CA route recovery: {e}"));
+            if result.is_ok() {
+                return Err(e);
+            }
+        }
+        result
+    }
     pub fn snapshot(&mut self) -> Result<Snapshot> {
         let services = self.supervisor.states(&self.store)?;
+        let installed = runtime::installed(&self.store)?;
         let mut sites = self.sites()?;
         let caddy = services
             .iter()
@@ -219,7 +244,13 @@ impl Application {
                 "missing"
             } else if site.issue.is_some() {
                 "conflict"
-            } else if !site.resolved.contains_key("php") {
+            } else if !site.resolved.contains_key("php")
+                || site.resolved.iter().any(|(kind, version)| {
+                    !installed
+                        .iter()
+                        .any(|r| r.manifest.runtime.key() == kind && r.manifest.version == *version)
+                })
+            {
                 "needs runtime"
             } else {
                 let required = site.resolved.iter().all(|(k, v)| {
@@ -264,7 +295,7 @@ impl Application {
             home: self.home.root().to_string_lossy().into(),
             platform: crate::platform::platform_key(),
             sites,
-            installed: runtime::installed(&self.store)?,
+            installed,
             available: catalog::available(&self.store)?,
             defaults,
             services,
@@ -289,11 +320,12 @@ impl Application {
                     ))
                 })
                 .collect::<Result<_>>()?,
+            startup: crate::platform::startup::state(&self.home)?,
+            environment_autostart: self.store.setting("autostart")?.as_deref() == Some("true"),
         })
     }
     pub fn start_all(&mut self) -> Result<()> {
         self.active = true;
-        self.store.set_setting("autostart", "true")?;
         self.start_required()
     }
     fn start_required(&mut self) -> Result<()> {
@@ -413,10 +445,12 @@ impl Application {
     pub fn stop_all(&mut self) -> Result<()> {
         self.routed.clear();
         self.active = false;
-        self.store.set_setting("autostart", "false")?;
         self.supervisor.stop_all(&self.store)
     }
     pub fn shutdown(&mut self) -> Result<()> {
+        self.active = false;
+        self.routed.clear();
+        self._dns = None;
         self.supervisor.stop_all(&self.store)
     }
     pub fn restart(&mut self) -> Result<()> {

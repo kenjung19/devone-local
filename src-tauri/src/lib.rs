@@ -3,6 +3,9 @@ pub mod catalog;
 pub mod config;
 pub mod core;
 pub mod database;
+#[cfg(feature = "desktop")]
+pub mod desktop;
+pub mod desktop_instance;
 pub mod dns;
 #[cfg(feature = "desktop")]
 pub mod ipc;

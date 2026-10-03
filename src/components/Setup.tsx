@@ -4,6 +4,7 @@ import type {
   RuntimeKind,
   InstallProgress,
 } from "../contracts";
+import { SetupRuntime } from "./SetupRuntime";
 export function Setup({
   data,
   busy,
@@ -68,65 +69,14 @@ export function Setup({
           </button>
         </div>
         {(["caddy", "php", "mysql"] as const).map((kind) => (
-          <div className="settings-row" key={kind}>
-            <div>
-              <strong>{kind.toUpperCase()}</strong>
-              {kind === "mysql" &&
-                s.mysql &&
-                !data.databases.some(
-                  (d) => d.runtime_id === "mysql:" + data.defaults.mysql,
-                ) && (
-                  <button
-                    disabled={busy}
-                    onClick={() =>
-                      void act({
-                        type: "database",
-                        runtime: {
-                          kind: "mysql",
-                          version: data.defaults.mysql,
-                        },
-                        operation: "initialize",
-                      })
-                    }
-                  >
-                    Initialize MySQL instance
-                  </button>
-                )}
-              <p>
-                {s[kind]
-                  ? "ติดตั้งแล้ว"
-                  : "เลือกเวอร์ชันหรือนำเข้า runtime ที่มีอยู่"}
-              </p>
-              <div className="actions">
-                {data.available
-                  .filter(
-                    (m) =>
-                      m.platform === data.platform &&
-                      m.runtime === kind &&
-                      !data.installed.some(
-                        (r) => r.id === kind + ":" + m.version,
-                      ),
-                  )
-                  .map((m) => (
-                    <button
-                      key={m.version}
-                      disabled={busy || !m.sha256 || !m.download}
-                      onClick={() =>
-                        void act({
-                          type: "install",
-                          runtime: { kind, version: m.version },
-                        })
-                      }
-                    >
-                      ติดตั้ง {m.version}
-                    </button>
-                  ))}
-              </div>
-            </div>
-            <button disabled={busy} onClick={() => importRuntime(kind)}>
-              Import
-            </button>
-          </div>
+          <SetupRuntime
+            key={kind}
+            data={data}
+            kind={kind}
+            busy={busy}
+            act={act}
+            importRuntime={importRuntime}
+          />
         ))}
         <div className="settings-row">
           <div>

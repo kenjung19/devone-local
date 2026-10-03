@@ -61,6 +61,8 @@ export interface Snapshot {
   dns_ready: boolean;
   ca_present: boolean;
   active: boolean;
+  startup: { supported: boolean; enabled: boolean; conflict: boolean };
+  environment_autostart: boolean;
   setup: {
     completed: boolean;
     home_ready: boolean;
@@ -99,6 +101,8 @@ export interface InstallProgress {
   error: string | null;
 }
 export type Action =
+  | { type: "startup" | "environment_autostart"; enabled: boolean }
+  | { type: "recreate_ca"; confirmed: boolean }
   | { type: "finish_setup"; skip: boolean }
   | { type: "remote_catalog"; url: string; sha256: string }
   | {
@@ -116,6 +120,7 @@ export type Action =
         | "restart"
         | "dns"
         | "trust"
+        | "remove_trust"
         | "refresh_catalog"
         | "remove_dns"
         | "hosts_fallback"

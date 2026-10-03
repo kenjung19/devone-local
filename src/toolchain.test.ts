@@ -1,6 +1,22 @@
 import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 describe("locked development toolchain", () => {
+  it("uses package application version as the release source without drifting Rust metadata", () => {
+    const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+    const config = JSON.parse(
+      readFileSync("src-tauri/tauri.conf.json", "utf8"),
+    );
+    const cargo = readFileSync("src-tauri/Cargo.toml", "utf8");
+    expect(config.version).toBe("../package.json");
+    expect(
+      cargo.match(/\[package\][\s\S]*?\nversion\s*=\s*"([^"]+)"/)?.[1],
+    ).toBe(pkg.version);
+    expect(config.bundle.windows.nsis.installMode).toBe("currentUser");
+    expect(config.bundle.targets).toEqual(["nsis"]);
+    expect(pkg.scripts["release:windows"]).toBe(
+      "node scripts/release-windows.mjs",
+    );
+  });
   it("keeps direct frontend dependencies exact and compiler/API aliases explicit", () => {
     const pkg = JSON.parse(readFileSync("package.json", "utf8")) as {
       packageManager: string;

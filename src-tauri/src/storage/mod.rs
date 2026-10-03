@@ -49,6 +49,27 @@ impl Store {
 mod tests {
     use super::*;
     #[test]
+    fn newer_schema_is_rejected_without_destructive_downgrade() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("future.db");
+        let db = rusqlite::Connection::open(&p).unwrap();
+        db.execute_batch("PRAGMA user_version=999; CREATE TABLE future_data(value TEXT); INSERT INTO future_data VALUES('preserve');").unwrap();
+        drop(db);
+        assert!(Store::open(&p).is_err());
+        let db = rusqlite::Connection::open(&p).unwrap();
+        assert_eq!(
+            db.query_row("SELECT value FROM future_data", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "preserve"
+        );
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            999
+        );
+    }
+    #[test]
     fn migration_is_idempotent_and_persistent() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("state.db");

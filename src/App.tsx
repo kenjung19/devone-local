@@ -2,6 +2,7 @@ import { Badge } from "./components/Badge";
 import { Stat, SiteDetail } from "./components/SiteDetail";
 import { ImportDialog, PhpDialog } from "./components/RuntimeDialogs";
 import { Setup } from "./components/Setup";
+import { ProductSettings } from "./components/ProductSettings";
 import type { InstallProgress } from "./contracts";
 import { Logs } from "./components/Logs";
 import { useCallback, useEffect, useState } from "react";
@@ -598,56 +599,7 @@ export default function App() {
                         </dd>
                       </dl>
                     </section>
-                    <section className="panel">
-                      <div className="panel-header">
-                        <h2>Local domains & HTTPS</h2>
-                      </div>
-                      <div className="settings-row">
-                        <div>
-                          <strong>Managed .test domains</strong>
-                          <p>
-                            Wildcard resolver สำหรับ *.test บน loopback และ
-                            Windows DNS policy เฉพาะ .test ใช้ helper แสดง UAC
-                            ครั้งเดียว
-                          </p>
-                        </div>
-                        <button
-                          disabled={busy}
-                          onClick={() => void act({ type: "dns" })}
-                        >
-                          Setup wildcard DNS
-                        </button>
-                      </div>
-                      <div className="settings-row">
-                        <div>
-                          <strong>Local certificate authority</strong>
-                          <p>
-                            Caddy creates and renews certificates. DEVONE
-                            installs trust for the current Windows user.
-                          </p>
-                        </div>
-                        <button
-                          disabled={busy || !data.ca_present}
-                          onClick={() => void act({ type: "trust" })}
-                        >
-                          Install CA trust
-                        </button>
-                      </div>
-                    </section>
-                    <div className="actions">
-                      <button
-                        disabled={busy}
-                        onClick={() => void act({ type: "remove_dns" })}
-                      >
-                        Remove owned DNS policy
-                      </button>
-                      <button
-                        disabled={busy}
-                        onClick={() => void act({ type: "hosts_fallback" })}
-                      >
-                        ใช้ hosts fallback แบบ explicit
-                      </button>
-                    </div>
+                    <ProductSettings data={data} busy={busy} act={act} />
                     <section className="panel">
                       <div className="panel-header">
                         <h2>Runtime catalog</h2>
@@ -659,10 +611,15 @@ export default function App() {
                         </button>
                       </div>
                       <p className="panel-copy">
-                        Edit <code>config/runtime-catalog.json</code> inside
-                        DEVONE_HOME. Downloads require HTTPS, a SHA-256
-                        checksum, and safe relative binary paths. Last-good
-                        catalog is preserved on failure.
+                        Bundled choices are ready to install. Catalog refresh
+                        preserves the last working version when an update fails.
+                      </p>
+                      <details className="panel-copy">
+                        <summary>Advanced catalog sources</summary>
+                        <p>
+                          Optional local override: config/runtime-catalog.json
+                          inside DEVONE Home.
+                        </p>
                         <label>
                           Remote catalog HTTPS URL
                           <input
@@ -689,7 +646,7 @@ export default function App() {
                         >
                           Verify & refresh remote catalog
                         </button>
-                      </p>
+                      </details>
                     </section>
                   </>
                 )}

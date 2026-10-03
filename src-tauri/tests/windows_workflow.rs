@@ -86,6 +86,14 @@ fn concurrent_native_runtime_workflow() {
         autostart: false,
     };
     let mut app = Application::open_with_options(home.clone(), options).unwrap();
+    assert_eq!(
+        runtime::inspect_import(RuntimeType::Php, &source("DEVONE_FIXTURE_PHP_B"))
+            .unwrap()
+            .version,
+        "8.5.1"
+    );
+    // Environment autostart is independent from the manual Start/Stop buttons.
+    app.store.set_setting("autostart", "true").unwrap();
     let php_a = app
         .import(
             manifest(RuntimeType::Php, "8.3.28"),
@@ -382,6 +390,37 @@ fn concurrent_native_runtime_workflow() {
         *devone::database::provision::secret(&home, &stored.credential_ref).unwrap(),
         *password
     );
+    assert_eq!(request(&home, "modern.test")["php"], "8.5.1");
+    app.stop_all().unwrap();
+    // Recreate while services run: only Caddy changes, PHP/MySQL keep their PIDs.
+    app.start_all().unwrap();
+    let before_ca = app.snapshot().unwrap();
+    let ca_path = home.path("certs/caddy/pki/authorities/local/root.crt");
+    let previous_ca = devone::tls::fingerprint(&ca_path).unwrap();
+    app.recreate_ca(true).unwrap();
+    assert_ne!(devone::tls::fingerprint(&ca_path).unwrap(), previous_ca);
+    let after_ca = app.snapshot().unwrap();
+    for service in before_ca
+        .services
+        .iter()
+        .filter(|s| s.healthy && !s.key.starts_with("caddy:"))
+    {
+        assert_eq!(
+            after_ca
+                .services
+                .iter()
+                .find(|s| s.key == service.key)
+                .unwrap()
+                .pid,
+            service.pid
+        );
+    }
+    assert!(std::fs::read_dir(home.path("backups")).unwrap().any(|p| {
+        p.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("caddy-ca-")
+    }));
     assert_eq!(request(&home, "modern.test")["php"], "8.5.1");
     app.stop_all().unwrap();
     assert!(home.path("database/mysql/8.4.3").is_dir());

@@ -68,6 +68,11 @@ pub fn finish(store: &Store, home: &Home, skip: bool) -> Result<()> {
             "Setup is incomplete. Retry failed steps or explicitly finish with skipped steps.",
         );
     }
+    // Fresh installed usage resumes the environment after reopening. An explicit
+    // preference already chosen in Settings is never changed by the wizard.
+    if store.setting("autostart")?.is_none() {
+        store.set_setting("autostart", "true")?;
+    }
     store.set_setting("setup.completed", "true")
 }
 pub fn prepare_ca(store: &Store, home: &Home) -> Result<()> {
@@ -116,6 +121,10 @@ mod tests {
         assert!(!state(&s, &h).unwrap().completed);
         assert!(finish(&s, &h, false).is_err());
         finish(&s, &h, true).unwrap();
+        assert_eq!(s.setting("autostart").unwrap().as_deref(), Some("true"));
+        s.set_setting("autostart", "false").unwrap();
+        finish(&s, &h, true).unwrap();
+        assert_eq!(s.setting("autostart").unwrap().as_deref(), Some("false"));
         assert!(state(&s, &h).unwrap().completed);
         s.set_setting("setup.completed", "false").unwrap();
         assert!(!state(&s, &h).unwrap().completed);

@@ -160,6 +160,62 @@ fn copy_tree(source: &Path, target: &Path) -> Result<()> {
     }
     Ok(())
 }
+pub fn inspect_import(kind: RuntimeType, root: &Path) -> Result<RuntimeManifest> {
+    if !matches!(
+        kind,
+        RuntimeType::Php | RuntimeType::Mysql | RuntimeType::Caddy
+    ) {
+        return fail("Unsupported Phase 1 runtime");
+    }
+    if !root.is_absolute() {
+        return fail("Choose an absolute runtime folder");
+    }
+    let binaries = crate::platform::binary_roles(&kind);
+    let role = if kind == RuntimeType::Php {
+        "cli"
+    } else {
+        "server"
+    };
+    let path = root.join(&binaries[role]);
+    let arg = if kind == RuntimeType::Caddy {
+        "version"
+    } else {
+        "--version"
+    };
+    let output = crate::process::run_checked(
+        &path,
+        &[arg.into()],
+        root,
+        &Default::default(),
+        Duration::from_secs(10),
+    )?;
+    let version = output
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+        .map(|t| t.trim_start_matches('v'))
+        .find(|t| {
+            let parts = t.split('.').collect::<Vec<_>>();
+            parts.len() == 3
+                && parts
+                    .iter()
+                    .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .ok_or_else(|| {
+            crate::core::Error::Message(
+                "Could not detect an exact runtime version; use Advanced import settings".into(),
+            )
+        })?;
+    let manifest = RuntimeManifest {
+        runtime: kind,
+        version: version.into(),
+        platform: crate::platform::platform_key(),
+        binaries,
+        download: None,
+        sha256: None,
+        metadata: Default::default(),
+    };
+    validate_at(&manifest, root)?;
+    Ok(manifest)
+}
 pub fn validate_at(manifest: &RuntimeManifest, root: &Path) -> Result<String> {
     manifest.validate()?;
     for relative in manifest.binaries.values() {

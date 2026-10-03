@@ -253,6 +253,64 @@ pub fn ca_trusted(path: &Path) -> bool {
     }
 }
 
+pub fn remove_ca_trust(path: &Path) -> Result<()> {
+    use windows_sys::Win32::Security::Cryptography::*;
+    let wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    unsafe {
+        let mut context: *mut std::ffi::c_void = std::ptr::null_mut();
+        if CryptQueryObject(
+            CERT_QUERY_OBJECT_FILE,
+            wide.as_ptr() as *const _,
+            CERT_QUERY_CONTENT_FLAG_CERT,
+            CERT_QUERY_FORMAT_FLAG_ALL,
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut context,
+        ) == 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let name: Vec<u16> = "ROOT".encode_utf16().chain(Some(0)).collect();
+        let store = CertOpenStore(
+            CERT_STORE_PROV_SYSTEM_W,
+            0,
+            0,
+            CERT_SYSTEM_STORE_CURRENT_USER,
+            name.as_ptr() as *const _,
+        );
+        if store.is_null() {
+            CertFreeCertificateContext(context as *const CERT_CONTEXT);
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let found = CertFindCertificateInStore(
+            store,
+            X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+            0,
+            CERT_FIND_EXISTING,
+            context,
+            std::ptr::null(),
+        );
+        // Deletion consumes only the exact matching certificate context.
+        let success = found.is_null() || CertDeleteCertificateFromStore(found) != 0;
+        CertCloseStore(store, 0);
+        CertFreeCertificateContext(context as *const CERT_CONTEXT);
+        if !success {
+            return fail(
+                "Could not remove the exact DEVONE certificate from the current user store",
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn crypt_secret(bytes: &[u8], decrypt: bool) -> Result<Vec<u8>> {
     use windows_sys::Win32::{Foundation::LocalFree, Security::Cryptography::*};
     unsafe {

@@ -86,4 +86,8 @@ Fixture versions เป็น verification baseline ไม่ใช่ catalog d
 
 ## ข้อจำกัดที่เหลือ
 
-UAC/NRPT/CA trust install-remove และ GUI flow ต้อง manual test บน Windows จริง Session automated tests ไม่อ้างว่าผ่านจุดเหล่านี้ ไม่มี installer/signing/tray/native folder picker/Composer manager/credential rotation/database migration UI หรือ macOS/Linux execution Port reservation ก่อน native bind มี race สั้นที่ health ownership guard ตรวจจับ Root bootstrap ยัง password ว่างบน loopback Catalog remote endpoint ต้องกำหนด URL+metadata checksum โดย explicit action Runtime binary ที่ import/downloadต้องเชื่อถือได้
+UAC/NRPT/CA trust install-remove และ GUI flow ต้อง manual test บน Windows จริง Session automated tests ไม่อ้างว่าผ่านจุดเหล่านี้ เพิ่ม NSIS packaging และ tray แล้ว แต่ยังไม่มี signing/native folder picker/Composer manager/credential rotation/database migration UI หรือ macOS/Linux execution Port reservation ก่อน native bind มี race สั้นที่ health ownership guard ตรวจจับ Root bootstrap ยัง password ว่างบน loopback Catalog remote endpoint ต้องกำหนด URL+metadata checksum โดย explicit action Runtime binary ที่ import/downloadต้องเชื่อถือได้
+
+## Desktop product lifecycle
+
+รายละเอียด installer/tray/activation/startup/CA อยู่ใน [windows-product.md](windows-product.md) Application version อ่านจาก package.json ผ่าน Tauri config; Cargo version ตรวจด้วย Node helper Standard development ไม่ต้อง workspace-env.ps1 ซึ่งเป็น optional cache adapter เท่านั้น Close window ซ่อนและ watcher คงอยู่ Quit shutdownownedservices+DNS Start/StopAllไม่เปลี่ยนenvironmentautostartpreferenceอีกต่อไป Fresh Setup ตั้งdefaultautostarttrueเฉพาะเมื่อยังไม่มีค่าที่ผู้ใช้เลือก

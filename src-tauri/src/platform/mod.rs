@@ -52,6 +52,41 @@ pub fn trust_ca(path: &Path) -> Result<()> {
     native::trust_ca(path)
 }
 pub struct Ownership(native::Ownership);
+pub fn allow_foreground(pid: u32) {
+    #[cfg(windows)]
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(pid);
+    }
+    #[cfg(not(windows))]
+    let _ = pid;
+}
+pub fn show_startup_error(message: &str) {
+    #[cfg(windows)]
+    unsafe {
+        let text: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
+        let title: Vec<u16> = "DEVONE Local".encode_utf16().chain(Some(0)).collect();
+        windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            title.as_ptr(),
+            0x10,
+        );
+    }
+    #[cfg(not(windows))]
+    eprintln!("DEVONE: {message}");
+}
+pub fn remove_ca_trust(path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        native::remove_ca_trust(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        fail("Certificate trust management currently supports Windows")
+    }
+}
+pub mod startup;
 impl Ownership {
     pub fn new() -> Result<Self> {
         Ok(Self(native::Ownership::new()?))

@@ -11,8 +11,10 @@
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
     "tauri": "tauri",
-    "desktop": "tauri dev",
-    "desktop:build": "tauri build",
+    "desktop": "node scripts/check-version.mjs && tauri dev",
+    "desktop:build": "node scripts/check-version.mjs && tauri build",
+    "release:windows": "node scripts/release-windows.mjs",
+    "version:check": "node scripts/check-version.mjs",
     "core": "cargo run --manifest-path src-tauri/Cargo.toml --no-default-features --bin devone-core --"
   },
   "dependencies": {

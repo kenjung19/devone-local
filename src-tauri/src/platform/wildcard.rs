@@ -37,15 +37,12 @@ fn preflight() -> Result<()> {
         if let Ok(parent) = hklm.open_subkey(base) {
             for entry in parent.enum_keys() {
                 let name = entry?;
-                if name == POLICY {
+                if base == BASE && name == POLICY {
                     continue;
                 }
                 let k = parent.open_subkey(name)?;
                 let names = k.get_value::<Vec<String>, _>("Name").unwrap_or_default();
-                if names
-                    .iter()
-                    .any(|n| n.eq_ignore_ascii_case(".test") || n.eq_ignore_ascii_case("test"))
-                {
+                if names.iter().any(|n| conflicts(n)) {
                     return fail("Another DNS policy owns .test; resolve the conflict first");
                 }
             }
@@ -106,7 +103,18 @@ pub fn elevate(remove: bool) -> Result<()> {
         info.lpParameters = args.as_ptr();
         info.nShow = 0;
         if ShellExecuteExW(&mut info) == 0 {
-            return Err(std::io::Error::last_os_error().into());
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(1223) {
+                return fail(
+                    "DNS setup was cancelled at the UAC prompt. No policy change was confirmed; retry when ready.",
+                );
+            }
+            if error.raw_os_error() == Some(5) {
+                return fail(
+                    "Windows denied permission for DNS setup. The application remains a normal user process; retry the helper.",
+                );
+            }
+            return Err(error.into());
         }
         let waited = WaitForSingleObject(info.hProcess, 120_000);
         let mut code = 1;
@@ -119,6 +127,9 @@ pub fn elevate(remove: bool) -> Result<()> {
     if !remove && !ready() {
         return fail("DNS policy verification failed");
     }
+    if remove && owned() {
+        return fail("The owned DNS policy is still present after removal; retry");
+    }
     crate::process::run_checked(
         &crate::platform::system_executable("ipconfig.exe")?,
         &["/flushdns".into()],
@@ -127,4 +138,27 @@ pub fn elevate(remove: bool) -> Result<()> {
         std::time::Duration::from_secs(5),
     )?;
     Ok(())
+}
+fn conflicts(namespace: &str) -> bool {
+    let name = namespace.trim_end_matches('.').to_ascii_lowercase();
+    name == "test" || name == ".test" || name.ends_with(".test")
+}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn foreign_test_namespaces_are_conflicts_but_other_domains_are_not() {
+        for name in [
+            "test",
+            ".test",
+            ".TEST.",
+            "legacy.test",
+            ".sub.test",
+            "*.test",
+        ] {
+            assert!(super::conflicts(name));
+        }
+        for name in [".com", "example.com", "contest", ".test.example.com"] {
+            assert!(!super::conflicts(name));
+        }
+    }
 }

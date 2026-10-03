@@ -71,6 +71,16 @@ pub enum Action {
     },
 
     Trust,
+    RemoveTrust,
+    RecreateCa {
+        confirmed: bool,
+    },
+    Startup {
+        enabled: bool,
+    },
+    EnvironmentAutostart {
+        enabled: bool,
+    },
     RefreshCatalog,
     Validate {
         runtime: RuntimeRef,
@@ -221,6 +231,18 @@ fn apply(app: &mut Application, action: Action) -> Result<Response> {
             }
         }
         Action::Trust => crate::tls::CaddyTls.trust(&app.store, &app.home)?,
+        Action::RemoveTrust => crate::tls::remove_trust(&app.store, &app.home)?,
+        Action::RecreateCa { confirmed } => {
+            app.recreate_ca(confirmed)?;
+            message = Some(
+                "New CA created. Install its trust again; old CA data is preserved in backups."
+                    .into(),
+            );
+        }
+        Action::Startup { enabled } => crate::platform::startup::set(&app.home, enabled)?,
+        Action::EnvironmentAutostart { enabled } => app
+            .store
+            .set_setting("autostart", if enabled { "true" } else { "false" })?,
         Action::RefreshCatalog => {
             if let (Some(url), Some(sha256)) = (
                 app.store.setting("catalog.remote.url")?,
@@ -324,4 +346,14 @@ pub async fn read_log(
 #[tauri::command]
 pub fn install_progress() -> Option<runtime::InstallProgress> {
     runtime::progress()
+}
+#[tauri::command]
+pub async fn inspect_import(
+    kind: RuntimeType,
+    source: String,
+) -> std::result::Result<RuntimeManifest, String> {
+    tauri::async_runtime::spawn_blocking(move || runtime::inspect_import(kind, Path::new(&source)))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
 }

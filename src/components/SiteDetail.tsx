@@ -24,11 +24,54 @@ export function SiteDetail({
   back: () => void;
   logs: () => void;
 }) {
+  const missing = (["php", "mysql"] as const).flatMap((kind) => {
+    const version = site.resolved[kind];
+    return version &&
+      !data.installed.some(
+        (r) => r.manifest.runtime === kind && r.manifest.version === version,
+      )
+      ? [{ kind, version }]
+      : [];
+  });
   return (
     <>
       <button className="back" onClick={back}>
         ← All sites
       </button>
+      {missing.map(({ kind, version }) => (
+        <div className="alert error" role="alert" key={kind}>
+          <strong>
+            {site.hostname} requires {kind.toUpperCase()} {version}
+          </strong>
+          <p>
+            {kind.toUpperCase()} {version} is not installed. This explicit
+            version is retained.
+          </p>
+          {data.available.some(
+            (m) =>
+              m.runtime === kind &&
+              m.version === version &&
+              m.platform === data.platform &&
+              m.download &&
+              m.sha256,
+          ) && (
+            <button
+              disabled={busy}
+              onClick={() =>
+                void act({ type: "install", runtime: { kind, version } })
+              }
+            >
+              Install {kind.toUpperCase()} {version}
+            </button>
+          )}
+          <button
+            disabled={busy}
+            onClick={() => document.getElementById(`runtime-${kind}`)?.focus()}
+          >
+            Change Runtime
+          </button>
+        </div>
+      ))}
       <section className="panel">
         <div className="panel-header">
           <div>
@@ -51,6 +94,7 @@ export function SiteDetail({
               <dt>{kind.toUpperCase()}</dt>
               <dd>
                 <select
+                  id={`runtime-${kind}`}
                   disabled={busy}
                   value={site.overrides[kind] ?? ""}
                   onChange={(e) =>
@@ -65,6 +109,12 @@ export function SiteDetail({
                   <option value="">
                     Global default ({data.defaults[kind] ?? "not configured"})
                   </option>
+                  {missing.some((m) => m.kind === kind) &&
+                    site.overrides[kind] && (
+                      <option value={site.overrides[kind]} disabled>
+                        {site.overrides[kind]} · Not installed
+                      </option>
+                    )}
                   {data.installed
                     .filter((r) => r.manifest.runtime === kind)
                     .map((r) => (

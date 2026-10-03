@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { bridge, desktop } from "../bridge";
 import type {
   RuntimeKind,
   Snapshot,
@@ -28,6 +30,28 @@ export function ImportDialog({
     JSON.stringify(data.binary_roles[kind], null, 2),
   );
   const [err, setErr] = useState("");
+  const [inspecting, setInspecting] = useState(false);
+  useEffect(() => {
+    if (!desktop) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        if (event.payload.type === "drop" && event.payload.paths[0]) {
+          setSource(event.payload.paths[0]);
+          setVersion("");
+        }
+      })
+      .then((remove) => {
+        if (disposed) remove();
+        else unlisten = remove;
+      })
+      .catch((e) => setErr(String(e)));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
   return (
     <div className="overlay">
       <form
@@ -67,7 +91,8 @@ export function ImportDialog({
         </h2>
         <p>
           Use a trusted, extracted native distribution. DEVONE copies and
-          validates it without changing global PATH.
+          validates it without changing global PATH. Drop its folder here or
+          paste the folder path, then detect the version.
         </p>
         <label>
           Exact binary version
@@ -87,20 +112,38 @@ export function ImportDialog({
             placeholder="Absolute path to extracted distribution"
           />
         </label>
-        <label>
-          Binary roles (relative paths)
-          <textarea
-            rows={5}
-            value={binaries}
-            onChange={(e) => setBinaries(e.target.value)}
-          />
-        </label>
+        <button
+          type="button"
+          disabled={busy || inspecting || !source}
+          onClick={() => {
+            setInspecting(true);
+            setErr("");
+            void bridge
+              .inspectImport(kind, source)
+              .then((m) => setVersion(m.version))
+              .catch((e) => setErr(String(e)))
+              .finally(() => setInspecting(false));
+          }}
+        >
+          {inspecting ? "Detecting…" : "Detect version"}
+        </button>
+        <details>
+          <summary>Advanced import settings</summary>
+          <label>
+            Binary roles (relative paths)
+            <textarea
+              rows={5}
+              value={binaries}
+              onChange={(e) => setBinaries(e.target.value)}
+            />
+          </label>
+        </details>
         {(err || error) && <p className="error">{err || error}</p>}
         <div className="actions">
           <button type="button" onClick={close}>
             Close
           </button>
-          <button className="primary" disabled={busy}>
+          <button className="primary" disabled={busy || inspecting}>
             {busy ? "Validating…" : "Import & validate"}
           </button>
         </div>
