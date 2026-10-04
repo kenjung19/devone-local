@@ -1,5 +1,7 @@
 # ผลตรวจสอบ — 4 ตุลาคม 2026
 
+Final acceptance รอบหลัง `8dc8c5f` อยู่ใน [รายงาน 21 ข้อ](phase1-acceptance.md): silent installed checks ผ่านบางส่วน แต่ GUI tool initialization ล้มเหลว จึง **PHASE 1 NOT COMPLETE** Artifact รอบล่าสุดและ hash อยู่ในรายงานนั้น ตัวเลข native workflow ด้านล่างเป็นผลรอบก่อน ไม่ได้รันซ้ำใน final acceptance
+
 Windows x64; Node 24.21.0 LTS, pnpm 12.8.1, Rust 1.99.0 ตรวจเวอร์ชันจริงและใช้ toolchain/cache บน D: ผ่าน `scripts/workspace-env.ps1` รายการ dependency exact pins อยู่ใน [รายงานรอบพัฒนา](phase1-continuation.md) และ [ข้อมูลที่ resolve](toolchain-versions.json)
 
 | คำสั่ง | ผล |
@@ -45,6 +47,7 @@ pnpm build
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml --features process-fixture --test process_lifecycle
 # ตั้ง fixture variables ตาม architecture ก่อน
 cargo test --manifest-path src-tauri/Cargo.toml --test windows_workflow -- --ignored --nocapture
 ```

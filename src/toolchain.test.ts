@@ -52,6 +52,13 @@ describe("locked development toolchain", () => {
     expect(readFileSync("rust-toolchain.toml", "utf8")).toContain(
       'channel = "1.99.0"',
     );
+    const fixture = cargo
+      .split("[[bin]]")
+      .find((section) => section.includes('name = "devone-process-fixture"'));
+    expect(fixture).toContain('required-features = ["process-fixture"]');
+    expect(cargo.match(/^default\s*=.*$/m)?.[0]).not.toContain(
+      "process-fixture",
+    );
     const catalog = JSON.parse(
       readFileSync("src-tauri/assets/runtime-catalog.json", "utf8"),
     ) as {

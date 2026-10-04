@@ -75,8 +75,13 @@ pnpm build
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml --features process-fixture --test process_lifecycle
 ```
 
 ดู [architecture](docs/architecture.md), [ผล verification](docs/verification.md) และ [รายงานรอบพัฒนา](docs/phase1-continuation.md) Native fixture test และคำสั่งอยู่ใน architecture
 
 `pnpm dev` แสดง frontend โดยไม่มีข้อมูล runtime จำลอง `pnpm desktop:build` สร้าง desktop executable และ NSIS installer `pnpm core start` ใช้ Ctrl+C หยุด owned services ไม่มี Node execution, database engine อื่น หรือ runtime support macOS/Linux ใน Phase 1
+
+`process-fixture` เป็น feature สำหรับ process lifecycle tests เท่านั้น ไม่เปิดใน default features หรือ desktop release เพื่อไม่ให้ test executable ติดไปกับ installer
+
+ผล final installed-product acceptance และรายการที่ยังต้องตรวจจริงอยู่ใน [รายงาน Phase 1 acceptance](docs/phase1-acceptance.md)
