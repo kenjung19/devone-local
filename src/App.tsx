@@ -11,7 +11,7 @@ import type { Action, Snapshot, RuntimeKind, Installation } from "./contracts";
 import { bindingLabel, availableSiteCount } from "./presentation";
 type Page = "Sites" | "Runtimes" | "Databases" | "Logs" | "Settings";
 const pages: Page[] = ["Sites", "Runtimes", "Databases", "Logs", "Settings"];
-const kinds: RuntimeKind[] = ["php", "mysql", "caddy"];
+const kinds: RuntimeKind[] = ["php", "mysql", "node", "caddy"];
 export default function App() {
   const [logSite, setLogSite] = useState<
     Snapshot["sites"][number] | undefined
@@ -293,8 +293,8 @@ export default function App() {
                             <thead>
                               <tr>
                                 <th>PROJECT</th>
-                                <th>PHP</th>
-                                <th>MYSQL</th>
+                                <th>RUNTIME</th>
+                                <th>DATABASE</th>
                                 <th>HTTPS</th>
                                 <th>STATUS</th>
                               </tr>
@@ -320,13 +320,26 @@ export default function App() {
                                           <small>
                                             {s.project_type === "laravel"
                                               ? "Laravel"
-                                              : "Plain PHP"}
+                                              : s.project_type.toUpperCase()}
                                           </small>
                                         </div>
                                       </div>
                                     </td>
-                                    <td>{bindingLabel(s, "php")}</td>
-                                    <td>{bindingLabel(s, "mysql")}</td>
+                                    <td>
+                                      {s.project_type === "static"
+                                        ? "Static"
+                                        : bindingLabel(
+                                            s,
+                                            s.resolved.node && !s.resolved.php
+                                              ? "node"
+                                              : "php",
+                                          )}
+                                    </td>
+                                    <td>
+                                      {s.resolved.mysql
+                                        ? bindingLabel(s, "mysql")
+                                        : "—"}
+                                    </td>
                                     <td>
                                       <Badge value={s.https} />
                                     </td>
@@ -360,14 +373,18 @@ export default function App() {
                                 ? "PHP"
                                 : kind === "mysql"
                                   ? "MySQL"
-                                  : "Caddy"}
+                                  : kind === "node"
+                                    ? "Node.js"
+                                    : "Caddy"}
                             </h2>
                             <p>
                               {kind === "php"
                                 ? "Version-based FastCGI pools"
                                 : kind === "mysql"
                                   ? "One persistent instance per engine version"
-                                  : "Local routing and automatic HTTPS"}
+                                  : kind === "node"
+                                    ? "Per-site Node versions and managed processes"
+                                    : "Local routing and automatic HTTPS"}
                             </p>
                           </div>
                           <button
@@ -684,7 +701,7 @@ export default function App() {
           )}
         </div>
         <footer>
-          DEVONE LOCAL <span>PHP + MySQL · Phase 1 foundation</span>
+          DEVONE LOCAL <span>PHP · Node · Static</span>
         </footer>
       </main>
       {importKind && data && (

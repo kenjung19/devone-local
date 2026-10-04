@@ -17,6 +17,7 @@ fn kind(value: &str) -> RuntimeType {
         "php" => RuntimeType::Php,
         "mysql" => RuntimeType::Mysql,
         "caddy" => RuntimeType::Caddy,
+        "node" => RuntimeType::Node,
         other => RuntimeType::Other(other.into()),
     }
 }

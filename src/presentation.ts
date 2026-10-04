@@ -11,6 +11,7 @@ export function availableSiteCount(sites: Pick<Site, "present">[]): number {
   return sites.filter((s) => s.present).length;
 }
 export function runtimeBinaries(kind: string): Record<string, string> {
+  if (kind === "node") return { cli: "node.exe" };
   if (kind === "php") return { cli: "php.exe", fastcgi: "php-cgi.exe" };
   if (kind === "mysql")
     return { server: "bin/mysqld.exe", admin: "bin/mysqladmin.exe" };

@@ -8,7 +8,7 @@ export function SetupRuntime({
   importRuntime,
 }: {
   data: Snapshot;
-  kind: RuntimeKind;
+  kind: Exclude<RuntimeKind, "node">;
   busy: boolean;
   act: (a: Action) => Promise<void>;
   importRuntime: (k: RuntimeKind) => void;

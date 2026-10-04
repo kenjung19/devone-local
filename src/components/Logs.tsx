@@ -3,9 +3,7 @@ import type { Site } from "../contracts";
 import { bridge } from "../bridge";
 export function Logs({ site }: { site?: Site }) {
   const [files, setFiles] = useState<string[]>([]);
-  const [name, setName] = useState(
-    site ? "site-" + site.id + ".log" : "devone.log",
-  );
+  const [name, setName] = useState(site ? "__combined__" : "devone.log");
   const [text, setText] = useState("");
   const [error, setError] = useState("");
   useEffect(() => {
@@ -18,8 +16,18 @@ export function Logs({ site }: { site?: Site }) {
     if (!name) return;
     let alive = true;
     const load = () =>
-      bridge
-        .readLog(name)
+      (name === "__combined__"
+        ? bridge.logFiles().then(async (names) => {
+            if (alive) setFiles(names);
+            const relevant = names.filter((f) => siteLogMatches(f, site));
+            return (
+              await Promise.all(
+                relevant.map(async (f) => `[${f}]\n${await bridge.readLog(f)}`),
+              )
+            ).join("\n\n");
+          })
+        : bridge.readLog(name)
+      )
         .then((t) => {
           if (alive) setText(t);
         })
@@ -32,17 +40,8 @@ export function Logs({ site }: { site?: Site }) {
       alive = false;
       clearInterval(id);
     };
-  }, [name]);
-  const visible = files.filter(
-    (f) =>
-      !site ||
-      f === "devone.log" ||
-      f === "caddy.log" ||
-      f === "site-" + site.id + ".log" ||
-      Object.entries(site.resolved).some(
-        ([kind, version]) => f === kind + "-" + version + ".log",
-      ),
-  );
+  }, [name, site]);
+  const visible = files.filter((f) => siteLogMatches(f, site));
   const recent = text
     .split("\n")
     .filter((line) =>
@@ -56,6 +55,7 @@ export function Logs({ site }: { site?: Site }) {
         <h2>{site ? site.hostname + " logs" : "Service logs"}</h2>
         <select value={name} onChange={(e) => setName(e.target.value)}>
           <option value="">Select log file</option>
+          {site && <option value="__combined__">All site streams</option>}
           {visible.map((f) => (
             <option key={f}>{f}</option>
           ))}
@@ -72,5 +72,18 @@ export function Logs({ site }: { site?: Site }) {
         {text || "Select a log file. The most recent 128 KiB will appear here."}
       </pre>
     </section>
+  );
+}
+
+export function siteLogMatches(f: string, site?: Site): boolean {
+  return (
+    !site ||
+    f === "devone.log" ||
+    f === "caddy.log" ||
+    f === `site-${site.id}.log` ||
+    f.startsWith(`site-${site.id}-`) ||
+    Object.entries(site.resolved).some(
+      ([kind, version]) => f === `${kind}-${version}.log`,
+    )
   );
 }

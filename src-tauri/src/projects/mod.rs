@@ -1,7 +1,10 @@
+pub mod metadata;
+pub mod processes;
 use crate::{
     core::{Result, fail, timestamp},
     storage::Store,
 };
+pub use metadata::Metadata;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -35,8 +38,46 @@ impl ProjectAdapter for Laravel {
         p.join("public")
     }
 }
+pub struct Next;
+pub struct Vite;
+pub struct Node;
+pub struct Static;
+fn dependency(p: &Path, name: &str) -> bool {
+    metadata::package(p).is_some_and(|j| {
+        ["dependencies", "devDependencies"]
+            .iter()
+            .any(|k| j[*k].get(name).is_some())
+    })
+}
+macro_rules! adapter {
+    ($t:ty,$kind:literal,$accept:expr) => {
+        impl ProjectAdapter for $t {
+            fn kind(&self) -> &'static str {
+                $kind
+            }
+            fn accepts(&self, p: &Path) -> bool {
+                ($accept)(p)
+            }
+            fn document_root(&self, p: &Path) -> PathBuf {
+                p.to_path_buf()
+            }
+        }
+    };
+}
+adapter!(Next, "next", |p: &Path| dependency(p, "next"));
+adapter!(Vite, "vite", |p: &Path| dependency(p, "vite"));
+adapter!(Node, "node", |p: &Path| p.join("package.json").is_file());
+adapter!(Static, "static", |p: &Path| p.join("index.html").is_file()
+    && !p.join("index.php").is_file());
 pub fn detect(p: &Path) -> (&'static str, PathBuf) {
-    let adapters: Vec<Box<dyn ProjectAdapter>> = vec![Box::new(Laravel), Box::new(PlainPhp)];
+    let adapters: Vec<Box<dyn ProjectAdapter>> = vec![
+        Box::new(Laravel),
+        Box::new(Next),
+        Box::new(Vite),
+        Box::new(Node),
+        Box::new(Static),
+        Box::new(PlainPhp),
+    ];
     let a = adapters
         .iter()
         .find(|a| a.accepts(p))
@@ -87,11 +128,21 @@ pub fn scan(store: &mut Store, www: &Path) -> Result<Discovery> {
             }
         };
         *hosts.entry(host.clone()).or_default() += 1;
-        detected.push((name, host, entry.path(), kind, root));
+        let meta = match metadata::inspect(&entry.path(), kind) {
+            Ok(meta) => meta,
+            Err(e) => {
+                issues.push(format!("{name}: {e}"));
+                Metadata {
+                    error: Some(e.to_string()),
+                    ..Metadata::for_kind(kind)
+                }
+            }
+        };
+        detected.push((name, host, entry.path(), kind, root, meta));
     }
     let tx = store.conn.transaction()?;
     tx.execute("UPDATE sites SET present=0", [])?;
-    for (name, host, path, kind, root) in &detected {
+    for (name, host, path, kind, root, meta) in &detected {
         let path = path.to_string_lossy().to_string();
         let root = root.to_string_lossy().to_string();
         let existing: Option<String> = {
@@ -111,8 +162,8 @@ pub fn scan(store: &mut Store, www: &Path) -> Result<Discovery> {
             tx.execute("UPDATE sites SET present=1,issue='Hostname conflict',updated_at=?2 WHERE project_path=?1", rusqlite::params![path,timestamp()])?;
             continue;
         }
-        tx.execute("INSERT INTO sites(id,name,hostname,project_path,project_type,document_root,present,discovered_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,1,?7,?7) ON CONFLICT(project_path) DO UPDATE SET name=excluded.name,project_type=excluded.project_type,document_root=excluded.document_root,present=1,issue=NULL,updated_at=excluded.updated_at",
-   rusqlite::params![uuid::Uuid::new_v4().to_string(),name,host,path,kind,root,timestamp()])?;
+        tx.execute("INSERT INTO sites(id,name,hostname,project_path,project_type,document_root,present,discovered_at,updated_at,metadata) VALUES(?1,?2,?3,?4,?5,?6,1,?7,?7,?8) ON CONFLICT(project_path) DO UPDATE SET name=excluded.name,project_type=excluded.project_type,document_root=excluded.document_root,present=1,issue=NULL,updated_at=excluded.updated_at,metadata=excluded.metadata",
+   rusqlite::params![uuid::Uuid::new_v4().to_string(),name,host,path,kind,root,timestamp(),serde_json::to_string(meta)?])?;
     }
     tx.commit()?;
     Ok(Discovery {

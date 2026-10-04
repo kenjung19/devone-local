@@ -15,6 +15,31 @@ pub type Shared = Arc<Mutex<Application>>;
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
+    SiteProcess {
+        site_id: String,
+        process_id: String,
+        operation: String,
+    },
+    SiteAction {
+        site_id: String,
+        operation: String,
+    },
+    SaveProcess {
+        site_id: String,
+        definition: crate::projects::processes::Definition,
+    },
+    SavePortable {
+        site_id: String,
+    },
+    InstallTool {
+        id: String,
+        version: String,
+        node: Option<String>,
+    },
+    InstallDependencies {
+        site_id: String,
+        manager: String,
+    },
     Scan,
     Start,
     Stop,
@@ -101,6 +126,43 @@ pub struct Response {
 fn apply(app: &mut Application, action: Action) -> Result<Response> {
     let mut message = None;
     match action {
+        Action::SiteProcess {
+            site_id,
+            process_id,
+            operation,
+        } => app.process_action(&site_id, &process_id, &operation)?,
+        Action::SiteAction { site_id, operation } => app.site_action(&site_id, &operation)?,
+        Action::SaveProcess {
+            site_id,
+            definition,
+        } => {
+            let site = app.site(&site_id)?;
+            app.supervisor
+                .stop(&app.store, &format!("site:{site_id}:{}", definition.id))?;
+            crate::projects::processes::save(&app.store, &site, &definition)?;
+            app.scan()?;
+        }
+        Action::SavePortable { site_id } => {
+            let site = app.site(&site_id)?;
+            let p = crate::projects::metadata::Portable {
+                schema_version: 1,
+                runtimes: site.overrides.clone(),
+                processes: site.processes.into_iter().map(|p| p.definition).collect(),
+            };
+            crate::projects::metadata::validate(&p, Path::new(&site.project_path))?;
+            let target = Path::new(&site.project_path).join(".devone.json");
+            if crate::platform::is_link(&target).unwrap_or(false) {
+                return crate::core::fail("Portable config must not be a link");
+            }
+            std::fs::write(target, serde_json::to_string_pretty(&p)?)?;
+            app.scan()?;
+        }
+        Action::InstallTool { id, version, node } => {
+            crate::tools::install(&app.store, &app.home, &id, &version, node.as_deref())?
+        }
+        Action::InstallDependencies { site_id, manager } => {
+            app.install_dependencies(&site_id, &manager)?
+        }
         Action::Provision {
             site_id,
             database_name,

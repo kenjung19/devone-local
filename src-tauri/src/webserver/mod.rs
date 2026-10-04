@@ -27,7 +27,16 @@ impl WebServer for Caddy {
         );
         for (site, port) in sites {
             crate::platform::validate_local_host(&site.hostname)?;
-            text.push_str(&format!("https://{} {{\n bind 127.0.0.1\n root * {}\n tls internal\n php_fastcgi 127.0.0.1:{port}\n file_server\n log {{\n  output file {}\n }}\n}}\nhttp://{} {{\n bind 127.0.0.1\n redir https://{}{{uri}} permanent\n}}\n",site.hostname,quoted(std::path::Path::new(&site.document_root))?,quoted(&home.path("logs").join(format!("site-{}.log",site.id)))?,site.hostname,site.hostname));
+            let handler = match site.metadata.route {
+                crate::projects::metadata::RouteStrategy::PhpFastcgi => {
+                    format!("php_fastcgi 127.0.0.1:{port}\n file_server")
+                }
+                crate::projects::metadata::RouteStrategy::NodeProxy => {
+                    format!("reverse_proxy 127.0.0.1:{port}")
+                }
+                crate::projects::metadata::RouteStrategy::Static => "file_server".into(),
+            };
+            text.push_str(&format!("https://{} {{\n bind 127.0.0.1\n root * {}\n tls internal\n {handler}\n log {{\n  output file {}\n }}\n}}\nhttp://{} {{\n bind 127.0.0.1\n redir https://{}{{uri}} permanent\n}}\n",site.hostname,quoted(std::path::Path::new(&site.document_root))?,quoted(&home.path("logs").join(format!("site-{}.log",site.id)))?,site.hostname,site.hostname));
         }
         Ok(text)
     }

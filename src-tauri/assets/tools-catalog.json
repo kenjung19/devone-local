@@ -1,0 +1,19 @@
+[
+  {
+    "id": "pnpm",
+    "version": "12.8.1",
+    "url": "https://registry.npmjs.org/pnpm/-/pnpm-12.8.1.tgz",
+    "sha256": "90762b8105e833164186b011efe5cde13841693ac8eaf784d2974a6e1c01fba3",
+    "entry": "node_modules/pnpm/bin/pnpm.mjs",
+    "native_url": "https://registry.npmjs.org/@pnpm/exe.win32-x64/-/exe.win32-x64-12.8.1.tgz",
+    "native_sha256": "cbda57f5b388023e136294cff589d913b6047c54be41f6a7a974c28bccb6590d",
+    "platform": "windows-x64"
+  },
+  {
+    "id": "composer",
+    "version": "2.10.3",
+    "url": "https://getcomposer.org/download/2.10.3/composer.phar",
+    "sha256": "7a2d379d5b8ffdaa028580ef26494c36d2feef4b178d3dd1473a4dbc5e17c8d6",
+    "entry": "composer.phar"
+  }
+]

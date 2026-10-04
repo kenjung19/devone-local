@@ -1,4 +1,4 @@
-export type RuntimeKind = "php" | "mysql" | "caddy";
+export type RuntimeKind = "php" | "mysql" | "caddy" | "node";
 export interface RuntimeRef {
   kind: RuntimeKind;
   version: string;
@@ -33,6 +33,8 @@ export interface Site {
   https: string;
   discovered_at: number;
   updated_at: number;
+  metadata?: ProjectMetadata;
+  processes?: ProjectProcess[];
 }
 export interface Service {
   key: string;
@@ -49,6 +51,8 @@ export interface Database {
   port: number | null;
 }
 export interface Snapshot {
+  tools?: Tool[];
+  available_tools?: Tool[];
   home: string;
   platform: string;
   sites: Site[];
@@ -101,6 +105,25 @@ export interface InstallProgress {
   error: string | null;
 }
 export type Action =
+  | {
+      type: "site_action";
+      site_id: string;
+      operation: "start" | "stop" | "restart";
+    }
+  | {
+      type: "site_process";
+      site_id: string;
+      process_id: string;
+      operation: "start" | "stop" | "restart" | "remove";
+    }
+  | { type: "save_process"; site_id: string; definition: ProcessDefinition }
+  | { type: "save_portable"; site_id: string }
+  | {
+      type: "install_dependencies";
+      site_id: string;
+      manager: "pnpm" | "composer";
+    }
+  | { type: "install_tool"; id: string; version: string; node: string | null }
   | { type: "startup" | "environment_autostart"; enabled: boolean }
   | { type: "recreate_ca"; confirmed: boolean }
   | { type: "finish_setup"; skip: boolean }
@@ -132,7 +155,7 @@ export type Action =
   | {
       type: "override";
       site_id: string;
-      kind: "php" | "mysql";
+      kind: "php" | "mysql" | "node";
       version: string | null;
     }
   | { type: "open_site" | "terminal"; site_id: string }
@@ -142,4 +165,46 @@ export type Action =
 export interface Response {
   snapshot: Snapshot;
   message: string | null;
+}
+
+export interface Tool {
+  id: string;
+  version: string;
+  url: string;
+  sha256: string;
+  entry: string;
+}
+export interface ProcessDefinition {
+  id: string;
+  name: string;
+  runtime: string;
+  executable: string;
+  args: string[];
+  cwd: string;
+  env: Record<string, string>;
+  port: boolean;
+  autostart: boolean;
+}
+export interface ProjectProcess {
+  site_id: string;
+  definition: ProcessDefinition;
+  enabled: boolean;
+  key: string;
+  assigned_port?: number | null;
+  health_strategy?: string;
+  status?: string;
+}
+export interface ProjectMetadata {
+  framework: string;
+  requirements: string[];
+  runtimes: Record<string, string>;
+  package_manager: string | null;
+  package_manager_version: string | null;
+  dev_script: string | null;
+  build_script: string | null;
+  route: "php_fastcgi" | "node_proxy" | "static";
+  node_dependencies: boolean;
+  composer_dependencies: boolean;
+  composer_manifest?: boolean;
+  error: string | null;
 }

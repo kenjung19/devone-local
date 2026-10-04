@@ -49,6 +49,42 @@ impl PortManager {
             _listener: listener,
         })
     }
+    pub fn allocate_process(store: &Store, owner: &str) -> Result<Reservation> {
+        if !owner.starts_with("site:") {
+            return Self::allocate(store, owner);
+        }
+        match Self::allocate(store, owner) {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                // Site ports are dynamic. TIME_WAIT or a foreign listener never warrants killing it.
+                // Choose another free port and let Caddy reconcile the new upstream.
+                let mut chosen = None;
+                for _ in 0..32 {
+                    let candidate = TcpListener::bind(("127.0.0.1", 0))?;
+                    let port = candidate.local_addr()?.port();
+                    let used: bool = store.conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM port_allocations WHERE port=?1)",
+                        [port],
+                        |r| r.get(0),
+                    )?;
+                    if !used {
+                        chosen = Some(candidate);
+                        break;
+                    }
+                }
+                let listener = chosen.ok_or_else(|| {
+                    crate::core::Error::Message("No unused project process port available".into())
+                })?;
+                let port = listener.local_addr()?.port();
+                store.conn.execute("INSERT INTO port_allocations(owner,port) VALUES(?1,?2) ON CONFLICT(owner) DO UPDATE SET port=excluded.port",rusqlite::params![owner,port])?;
+                tracing::warn!(service=%owner,port,error=%e,"previous project port unavailable; assigned a new free port");
+                Ok(Reservation {
+                    port,
+                    _listener: listener,
+                })
+            }
+        }
+    }
     pub fn reserve(store: &Store, owner: &str, port: u16) -> Result<Reservation> {
         if port == 0 {
             return fail("Cannot reserve port zero");

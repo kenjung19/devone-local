@@ -78,6 +78,7 @@ impl RuntimeManifest {
             RuntimeType::Php => &["cli", "fastcgi"],
             RuntimeType::Mysql => &["server", "admin"],
             RuntimeType::Caddy => &["server"],
+            RuntimeType::Node => &["cli"],
             _ => &[],
         };
         for key in required {

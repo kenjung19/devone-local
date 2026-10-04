@@ -27,23 +27,13 @@ pub fn view(core: &mut Application) -> crate::core::Result<TrayView> {
         "Environment stopped"
     };
     let ready = core.dns_owned() && crate::platform::wildcard_system_ready();
-    let caddy = services
-        .iter()
-        .any(|s| s.key.starts_with("caddy:") && s.healthy);
     let sites = core
-        .sites()?
+        .snapshot()?
+        .sites
         .into_iter()
         .filter(|s| s.present)
         .map(|s| {
-            let enabled = ready
-                && caddy
-                && s.issue.is_none()
-                && s.resolved.contains_key("php")
-                && s.resolved.iter().all(|(k, v)| {
-                    services
-                        .iter()
-                        .any(|p| p.key == format!("{k}:{v}") && p.healthy)
-                });
+            let enabled = ready && s.status == "running";
             (s.id, s.hostname, enabled)
         })
         .collect();

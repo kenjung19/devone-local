@@ -181,3 +181,95 @@ describe("desktop setup and configuration presentation", () => {
     expect(html).toContain("Project database");
   });
 });
+
+describe("Phase 2 site controls", () => {
+  it("keeps Node-only selectors and processes free of PHP/MySQL controls", () => {
+    const node: Site = {
+      ...site,
+      project_type: "next",
+      resolved: { node: "24.21.0" },
+      metadata: {
+        framework: "next",
+        requirements: ["node"],
+        runtimes: {},
+        package_manager: "pnpm",
+        package_manager_version: "12.8.1",
+        dev_script: "dev",
+        build_script: "build",
+        route: "node_proxy",
+        node_dependencies: false,
+        composer_dependencies: false,
+        error: null,
+      },
+      processes: [
+        {
+          site_id: site.id,
+          key: `site:${site.id}:web`,
+          enabled: false,
+          definition: {
+            id: "web",
+            name: "Web",
+            runtime: "node",
+            executable: "pnpm",
+            args: ["run", "dev"],
+            cwd: ".",
+            env: {},
+            port: true,
+            autostart: true,
+          },
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(
+      <SiteDetail
+        site={node}
+        data={data}
+        busy={false}
+        act={act}
+        back={() => {}}
+        logs={() => {}}
+      />,
+    );
+    expect(html).toContain("runtime-node");
+    expect(html).not.toContain("runtime-php");
+    expect(html).not.toContain("runtime-mysql");
+    expect(html).not.toContain("Project database");
+    expect(html).toContain("node_modules missing");
+    expect(html).toContain("Install pnpm dependencies");
+    expect(html).toContain("disabled");
+    expect(html).toContain("start site");
+  });
+  it("honestly marks npm projects and provides static controls without runtime selectors", () => {
+    const staticSite: Site = {
+      ...site,
+      project_type: "static",
+      resolved: {},
+      metadata: {
+        framework: "static",
+        requirements: [],
+        runtimes: {},
+        package_manager: null,
+        package_manager_version: null,
+        dev_script: null,
+        build_script: null,
+        route: "static",
+        node_dependencies: false,
+        composer_dependencies: false,
+        error: null,
+      },
+    };
+    const html = renderToStaticMarkup(
+      <SiteDetail
+        site={staticSite}
+        data={data}
+        busy={false}
+        act={act}
+        back={() => {}}
+        logs={() => {}}
+      />,
+    );
+    expect(html).not.toContain("runtime-php");
+    expect(html).not.toContain("runtime-node");
+    expect(html).toContain("start site");
+  });
+});

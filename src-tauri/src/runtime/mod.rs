@@ -98,8 +98,11 @@ pub fn override_site(
     kind: &RuntimeType,
     version: Option<&str>,
 ) -> Result<()> {
-    if !matches!(kind, RuntimeType::Php | RuntimeType::Mysql) {
-        return fail("Only PHP/MySQL site bindings are supported in Phase 1");
+    if !matches!(
+        kind,
+        RuntimeType::Php | RuntimeType::Mysql | RuntimeType::Node
+    ) {
+        return fail("Only PHP, MySQL and Node site bindings are supported");
     }
     let exists: bool = store.conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sites WHERE id=?1)",
@@ -124,13 +127,24 @@ pub fn override_site(
         }
     }
     if let Some(version) = version {
-        find(
-            store,
-            &RuntimeRef {
-                kind: kind.clone(),
-                version: version.into(),
-            },
-        )?;
+        if *kind == RuntimeType::Node {
+            let parts = version.split('.').collect::<Vec<_>>();
+            if parts.len() != 3
+                || parts
+                    .iter()
+                    .any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
+            {
+                return fail("Node override requires an exact major.minor.patch version");
+            }
+        } else {
+            find(
+                store,
+                &RuntimeRef {
+                    kind: kind.clone(),
+                    version: version.into(),
+                },
+            )?;
+        }
         store.conn.execute("INSERT INTO site_runtime_overrides(site_id,kind,version) VALUES(?1,?2,?3) ON CONFLICT(site_id,kind) DO UPDATE SET version=excluded.version",rusqlite::params![site_id,kind.key(),version])?;
     } else {
         store.conn.execute(
@@ -163,15 +177,15 @@ fn copy_tree(source: &Path, target: &Path) -> Result<()> {
 pub fn inspect_import(kind: RuntimeType, root: &Path) -> Result<RuntimeManifest> {
     if !matches!(
         kind,
-        RuntimeType::Php | RuntimeType::Mysql | RuntimeType::Caddy
+        RuntimeType::Php | RuntimeType::Mysql | RuntimeType::Caddy | RuntimeType::Node
     ) {
-        return fail("Unsupported Phase 1 runtime");
+        return fail("Unsupported runtime");
     }
     if !root.is_absolute() {
         return fail("Choose an absolute runtime folder");
     }
     let binaries = crate::platform::binary_roles(&kind);
-    let role = if kind == RuntimeType::Php {
+    let role = if matches!(kind, RuntimeType::Php | RuntimeType::Node) {
         "cli"
     } else {
         "server"
@@ -223,7 +237,7 @@ pub fn validate_at(manifest: &RuntimeManifest, root: &Path) -> Result<String> {
             return fail(format!("Missing runtime binary: {relative}"));
         }
     }
-    let role = if manifest.runtime == RuntimeType::Php {
+    let role = if matches!(manifest.runtime, RuntimeType::Php | RuntimeType::Node) {
         "cli"
     } else {
         "server"
@@ -256,6 +270,25 @@ pub fn validate_at(manifest: &RuntimeManifest, root: &Path) -> Result<String> {
     }
     Ok(output.trim().into())
 }
+fn rename_runtime(source: &Path, target: &Path) -> std::io::Result<()> {
+    // Windows may briefly retain an executable image/AV handle after --version validation.
+    // Only retry the verified staging move; never overwrite a destination or touch project data.
+    for attempt in 0..50 {
+        match std::fs::rename(source, target) {
+            Ok(()) => return Ok(()),
+            Err(e)
+                if cfg!(windows)
+                    && matches!(e.raw_os_error(), Some(5 | 32))
+                    && attempt < 49
+                    && !target.exists() =>
+            {
+                std::thread::sleep(Duration::from_millis(100))
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!()
+}
 pub fn import(
     store: &Store,
     home: &Home,
@@ -265,9 +298,9 @@ pub fn import(
     manifest.validate()?;
     if !matches!(
         manifest.runtime,
-        RuntimeType::Php | RuntimeType::Mysql | RuntimeType::Caddy
+        RuntimeType::Php | RuntimeType::Mysql | RuntimeType::Caddy | RuntimeType::Node
     ) {
-        return fail("Runtime execution for this kind is planned beyond Phase 1");
+        return fail("Unsupported runtime execution");
     }
     let id = format!("{}:{}", manifest.runtime.key(), manifest.version);
     if installed(store)?.iter().any(|i| i.id == id) {
@@ -298,7 +331,7 @@ pub fn import(
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::rename(&staging, &target).map_err(|e| {
+        rename_runtime(&staging, &target).map_err(|e| {
             crate::core::Error::Message(format!(
                 "Runtime import move {} to {}: {e}",
                 staging.display(),
@@ -475,7 +508,12 @@ pub fn remove(store: &Store, home: &Home, reference: &RuntimeRef) -> Result<()> 
         [&runtime.id],
         |r| r.get(0),
     )?;
-    if used || default || database {
+    let portable: bool = store.conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sites WHERE json_extract(metadata, '$.runtimes.' || ?1)=?2)",
+        rusqlite::params![reference.kind.key(), reference.version],
+        |r| r.get(0),
+    )?;
+    if used || portable || default || database {
         return fail(
             "Runtime is referenced by a site/default/database instance and cannot be removed",
         );

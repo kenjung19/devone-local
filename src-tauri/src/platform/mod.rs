@@ -102,6 +102,16 @@ impl Ownership {
             false
         }
     }
+    pub fn terminate(&self) -> Result<()> {
+        #[cfg(windows)]
+        {
+            self.0.terminate()
+        }
+        #[cfg(not(windows))]
+        {
+            Ok(())
+        }
+    }
     pub fn attach(&self, child: &Child) -> Result<()> {
         self.0.attach(child)
     }
@@ -213,6 +223,7 @@ pub fn binary_roles(kind: &crate::core::RuntimeType) -> BTreeMap<String, String>
     let suffix = if cfg!(windows) { ".exe" } else { "" };
     let pairs: &[(&str, &str)] = match kind {
         crate::core::RuntimeType::Php => &[("cli", "php"), ("fastcgi", "php-cgi")],
+        crate::core::RuntimeType::Node => &[("cli", "node")],
         crate::core::RuntimeType::Mysql => &[
             ("server", "bin/mysqld"),
             ("admin", "bin/mysqladmin"),

@@ -16,4 +16,26 @@ pub struct Site {
     pub resolved: BTreeMap<String, String>,
     pub status: String,
     pub https: String,
+    #[serde(default)]
+    pub metadata: crate::projects::Metadata,
+    #[serde(default)]
+    pub processes: Vec<crate::projects::processes::ProjectProcess>,
+}
+
+impl Site {
+    pub fn required_kinds(&self) -> Vec<&str> {
+        use crate::projects::metadata::RouteStrategy;
+        let mut kinds = match self.metadata.route {
+            RouteStrategy::PhpFastcgi => vec!["php"],
+            RouteStrategy::NodeProxy => vec!["node"],
+            RouteStrategy::Static => vec![],
+        };
+        if self.resolved.contains_key("mysql") {
+            kinds.push("mysql");
+        }
+        kinds
+    }
+    pub fn route_identity(&self) -> String {
+        format!("{:?}:{:?}", self.metadata.route, self.resolved)
+    }
 }

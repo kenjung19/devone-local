@@ -273,6 +273,7 @@ impl Supervisor {
                 p.child.kill()?;
             }
             let _ = p.child.wait()?;
+            p._ownership.terminate()?;
             tracing::info!(service=%key,"process stopped");
         }
         store.conn.execute(
@@ -377,4 +378,55 @@ pub fn run_checked(
     let _ = std::fs::remove_file(out);
     let _ = std::fs::remove_file(err);
     result
+}
+
+/// One-shot dependency/tool action: owned descendants, persistent output, no recovery/replay.
+pub fn run_logged(
+    binary: &std::path::Path,
+    args: &[String],
+    cwd: &std::path::Path,
+    env: &BTreeMap<String, String>,
+    timeout: Duration,
+    log: &std::path::Path,
+) -> Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)?;
+    writeln!(file, "[DEVONE] Starting explicit install action")?;
+    let ownership = platform::Ownership::new()?;
+    let mut cmd = Command::new(binary);
+    platform::configure(&mut cmd);
+    let mut child = cmd
+        .args(args)
+        .current_dir(cwd)
+        .envs(env)
+        .stdin(Stdio::null())
+        .stdout(file.try_clone()?)
+        .stderr(file.try_clone()?)
+        .spawn()?;
+    if let Err(e) = ownership.attach(&child) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(e);
+    }
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            writeln!(file, "[DEVONE] Finished: {status}")?;
+            return if status.success() {
+                Ok(())
+            } else {
+                fail(format!("Install failed ({status}); see {}", log.display()))
+            };
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            writeln!(file, "[DEVONE] Timed out")?;
+            return fail(format!("Install timed out; see {}", log.display()));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }

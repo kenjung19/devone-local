@@ -37,6 +37,8 @@ pub struct Snapshot {
     pub php_settings: BTreeMap<String, crate::runtime::PhpSettings>,
     pub startup: crate::platform::startup::State,
     pub environment_autostart: bool,
+    pub tools: Vec<crate::tools::Tool>,
+    pub available_tools: Vec<crate::tools::Tool>,
 }
 #[derive(Clone, Copy)]
 pub struct Options {
@@ -146,7 +148,7 @@ impl Application {
         Ok(())
     }
     pub fn sites(&self) -> Result<Vec<Site>> {
-        let mut stmt=self.store.conn.prepare("SELECT id,name,hostname,project_path,project_type,document_root,present,issue,discovered_at,updated_at FROM sites ORDER BY name")?;
+        let mut stmt=self.store.conn.prepare("SELECT id,name,hostname,project_path,project_type,document_root,present,issue,discovered_at,updated_at,metadata FROM sites ORDER BY name")?;
         let rows = stmt.query_map([], |r| {
             Ok(Site {
                 id: r.get(0)?,
@@ -163,6 +165,8 @@ impl Application {
                 resolved: BTreeMap::new(),
                 status: "stopped".into(),
                 https: "unavailable".into(),
+                metadata: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or_default(),
+                processes: Vec::new(),
             })
         })?;
         let mut sites = rows.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -175,7 +179,24 @@ impl Application {
             site.overrides = stmt
                 .query_map([&site.id], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<std::result::Result<BTreeMap<_, _>, _>>()?;
-            for kind in [RuntimeType::Php, RuntimeType::Mysql] {
+            for (k, v) in &site.metadata.runtimes {
+                site.overrides.entry(k.clone()).or_insert(v.clone());
+            }
+            site.processes = crate::projects::processes::list(&self.store, site)?;
+            for kind in [RuntimeType::Php, RuntimeType::Mysql, RuntimeType::Node] {
+                if !site.metadata.requirements.iter().any(|k| k == kind.key())
+                    && !site
+                        .processes
+                        .iter()
+                        .any(|p| p.definition.runtime == kind.key())
+                    && !site.metadata.runtimes.contains_key(kind.key())
+                    && !(kind == RuntimeType::Mysql
+                        && site.metadata.route
+                            == crate::projects::metadata::RouteStrategy::PhpFastcgi)
+                {
+                    continue;
+                }
+
                 if kind == RuntimeType::Mysql
                     && let Some(binding) = database_bindings.iter().find(|b| b.site_id == site.id)
                 {
@@ -244,25 +265,36 @@ impl Application {
                 "missing"
             } else if site.issue.is_some() {
                 "conflict"
-            } else if !site.resolved.contains_key("php")
-                || site.resolved.iter().any(|(kind, version)| {
-                    !installed
-                        .iter()
-                        .any(|r| r.manifest.runtime.key() == kind && r.manifest.version == *version)
+            } else if site.metadata.error.is_some() {
+                "needs attention"
+            } else if site.required_kinds().iter().any(|kind| {
+                site.resolved.get(*kind).is_none_or(|version| {
+                    !installed.iter().any(|r| {
+                        r.manifest.runtime.key() == *kind && r.manifest.version == *version
+                    })
+                })
+            }) {
+                "needs runtime"
+            } else if caddy
+                && self.routed.get(&site.id) == Some(&site.route_identity())
+                && site.required_kinds().iter().all(|k| {
+                    if *k == "node" {
+                        site.processes
+                            .iter()
+                            .filter(|p| p.enabled && p.definition.id == "web")
+                            .all(|p| services.iter().any(|s| s.key == p.key && s.healthy))
+                    } else {
+                        site.resolved.get(*k).is_some_and(|v| {
+                            services
+                                .iter()
+                                .any(|s| s.key == format!("{k}:{v}") && s.healthy)
+                        })
+                    }
                 })
             {
-                "needs runtime"
+                "running"
             } else {
-                let required = site.resolved.iter().all(|(k, v)| {
-                    services
-                        .iter()
-                        .any(|s| s.key == format!("{k}:{v}") && s.healthy)
-                });
-                if caddy && required && self.routed.get(&site.id) == site.resolved.get("php") {
-                    "running"
-                } else {
-                    "stopped"
-                }
+                "stopped"
             }
             .into();
             site.https = if site.status == "running" {
@@ -284,7 +316,12 @@ impl Application {
             .map(|s| s.hostname.clone())
             .collect::<Vec<_>>();
         let mut defaults = BTreeMap::new();
-        for kind in [RuntimeType::Php, RuntimeType::Mysql, RuntimeType::Caddy] {
+        for kind in [
+            RuntimeType::Php,
+            RuntimeType::Mysql,
+            RuntimeType::Caddy,
+            RuntimeType::Node,
+        ] {
             if let Some(r) = runtime::default_ref(&self.store, &kind)? {
                 defaults.insert(kind.key().into(), r.version);
             }
@@ -304,10 +341,15 @@ impl Application {
             dns_ready: self.dns_owned() && crate::dns::LocalDns.ready(&hosts),
             ca_present: ca,
             active: self.active,
-            binary_roles: [RuntimeType::Php, RuntimeType::Mysql, RuntimeType::Caddy]
-                .into_iter()
-                .map(|kind| (kind.key().to_string(), crate::platform::binary_roles(&kind)))
-                .collect(),
+            binary_roles: [
+                RuntimeType::Php,
+                RuntimeType::Mysql,
+                RuntimeType::Caddy,
+                RuntimeType::Node,
+            ]
+            .into_iter()
+            .map(|kind| (kind.key().to_string(), crate::platform::binary_roles(&kind)))
+            .collect(),
             project_databases: crate::database::provision::bindings(&self.store)?,
             setup,
             php_settings: runtime::installed(&self.store)?
@@ -322,6 +364,8 @@ impl Application {
                 .collect::<Result<_>>()?,
             startup: crate::platform::startup::state(&self.home)?,
             environment_autostart: self.store.setting("autostart")?.as_deref() == Some("true"),
+            tools: crate::tools::installed(&self.store)?,
+            available_tools: crate::tools::available()?,
         })
     }
     pub fn start_all(&mut self) -> Result<()> {
@@ -332,42 +376,103 @@ impl Application {
         let sites = self
             .sites()?
             .into_iter()
-            .filter(|s| s.present && s.issue.is_none() && s.resolved.contains_key("php"))
+            .filter(|s| s.present && s.issue.is_none() && s.metadata.error.is_none())
             .collect::<Vec<_>>();
         let mut wanted = BTreeSet::new();
         let mut routes = Vec::new();
+        let mut errors = Vec::new();
         for site in &sites {
-            for (kind, version) in &site.resolved {
-                let kind = match kind.as_str() {
-                    "php" => RuntimeType::Php,
-                    "mysql" => RuntimeType::Mysql,
-                    _ => continue,
-                };
-                let reference = RuntimeRef {
-                    kind: kind.clone(),
-                    version: version.clone(),
-                };
-                let runtime = runtime::find(&self.store, &reference)?;
-                wanted.insert(runtime.id.clone());
-                if kind == RuntimeType::Php {
-                    self.start_php(&runtime)?;
-                } else {
-                    crate::database::start(
-                        &self.store,
-                        &self.home,
-                        &mut self.supervisor,
-                        &runtime,
-                    )?;
-                }
+            if self
+                .store
+                .setting(&format!("site.{}.disabled", site.id))?
+                .as_deref()
+                == Some("true")
+            {
+                continue;
             }
-            let key = format!("php:{}", site.resolved["php"]);
-            let port = self.store.conn.query_row(
-                "SELECT port FROM port_allocations WHERE owner=?1",
-                [key],
-                |r| r.get(0),
-            )?;
-            routes.push((site.clone(), port));
+            let result = (|| -> Result<()> {
+                for kind in site.required_kinds() {
+                    if kind == "node" {
+                        continue;
+                    }
+                    let version = site.resolved.get(kind).ok_or_else(|| {
+                        crate::core::Error::Message(format!("Select {kind} for {}", site.hostname))
+                    })?;
+                    let runtime = runtime::find(
+                        &self.store,
+                        &RuntimeRef {
+                            kind: if kind == "php" {
+                                RuntimeType::Php
+                            } else {
+                                RuntimeType::Mysql
+                            },
+                            version: version.clone(),
+                        },
+                    )?;
+                    wanted.insert(runtime.id.clone());
+                    if kind == "php" {
+                        self.start_php(&runtime)?;
+                    } else {
+                        crate::database::start(
+                            &self.store,
+                            &self.home,
+                            &mut self.supervisor,
+                            &runtime,
+                        )?;
+                    }
+                }
+                for process in site.processes.iter().filter(|p| p.enabled) {
+                    if process.definition.autostart || self.supervisor.contains(&process.key) {
+                        wanted.insert(process.key.clone());
+                        if let Err(e) = self.start_project_process(site, process) {
+                            errors.push(format!(
+                                "{} / {}: {e}",
+                                site.hostname, process.definition.name
+                            ));
+                        }
+                    }
+                }
+                use crate::projects::metadata::RouteStrategy;
+                let port = match site.metadata.route {
+                    RouteStrategy::Static => 0,
+                    RouteStrategy::PhpFastcgi => self.store.conn.query_row(
+                        "SELECT port FROM port_allocations WHERE owner=?1",
+                        [format!("php:{}", site.resolved["php"])],
+                        |r| r.get(0),
+                    )?,
+                    RouteStrategy::NodeProxy => {
+                        let Some(web) = site
+                            .processes
+                            .iter()
+                            .find(|p| p.definition.id == "web" && p.enabled)
+                        else {
+                            return Ok(());
+                        };
+                        if !self
+                            .supervisor
+                            .states(&self.store)?
+                            .iter()
+                            .any(|s| s.key == web.key && s.healthy)
+                        {
+                            return Ok(());
+                        }
+                        self.store.conn.query_row(
+                            "SELECT port FROM port_allocations WHERE owner=?1",
+                            [&web.key],
+                            |r| r.get(0),
+                        )?
+                    }
+                };
+                routes.push((site.clone(), port));
+                Ok(())
+            })();
+            if let Err(e) = result {
+                errors.push(format!("{}: {e}", site.hostname));
+            }
         }
+        self.issues.retain(|s| !s.starts_with("Project: "));
+        self.issues
+            .extend(errors.into_iter().map(|s| format!("Project: {s}")));
         if !routes.is_empty() {
             let reference =
                 runtime::default_ref(&self.store, &RuntimeType::Caddy)?.ok_or_else(|| {
@@ -392,7 +497,7 @@ impl Application {
             )?;
             self.routed = routes
                 .iter()
-                .map(|(s, _)| (s.id.clone(), s.resolved["php"].clone()))
+                .map(|(s, _)| (s.id.clone(), s.route_identity()))
                 .collect();
         }
         if routes.is_empty() {
@@ -404,6 +509,186 @@ impl Application {
             }
         }
         Ok(())
+    }
+    fn start_project_process(
+        &mut self,
+        site: &Site,
+        p: &crate::projects::processes::ProjectProcess,
+    ) -> Result<()> {
+        let binding = site
+            .resolved
+            .get(&p.definition.runtime)
+            .cloned()
+            .unwrap_or_default();
+        let fingerprint = serde_json::to_string(&(binding, &p.definition))?;
+        let key = format!("process.binding.{}", p.key);
+        if self.supervisor.contains(&p.key)
+            && self.store.setting(&key)?.as_deref() != Some(&fingerprint)
+        {
+            self.supervisor.stop(&self.store, &p.key)?;
+        }
+        if self.supervisor.contains(&p.key) {
+            return Ok(());
+        }
+        if p.definition.executable == "pnpm" && !site.metadata.node_dependencies {
+            return fail(
+                "node_modules is missing. Use Install Dependencies explicitly before starting",
+            );
+        }
+        if site.project_type == "laravel"
+            && p.definition.runtime == "php"
+            && !site.metadata.composer_dependencies
+        {
+            return fail("vendor is missing. Use Install Composer Dependencies explicitly");
+        }
+        let reservation = if p.definition.port {
+            Some(PortManager::allocate_process(&self.store, &p.key)?)
+        } else {
+            None
+        };
+        let spec = crate::tools::command(
+            &self.store,
+            &self.home,
+            site,
+            &p.definition,
+            reservation.as_ref().map(|r| r.port),
+        )?;
+        drop(reservation);
+        self.supervisor.start(&self.store, spec)?;
+        self.store.set_setting(&key, &fingerprint)?;
+        if let Err(error) =
+            self.supervisor
+                .wait_healthy(&self.store, &p.key, Duration::from_secs(20))
+        {
+            // An unsuccessful first Start must not leave an unauthorized recovery task running.
+            self.supervisor.stop(&self.store, &p.key)?;
+            self.store.conn.execute(
+                "UPDATE process_state SET status='failed' WHERE service_key=?1",
+                [&p.key],
+            )?;
+            return Err(error);
+        }
+        Ok(())
+    }
+    pub fn process_action(&mut self, id: &str, process_id: &str, operation: &str) -> Result<()> {
+        let site = self.site(id)?;
+        match operation {
+            "start" | "restart" => {
+                let p = site
+                    .processes
+                    .iter()
+                    .find(|p| p.definition.id == process_id)
+                    .ok_or_else(|| crate::core::Error::Message("Unknown project process".into()))?;
+                if site.metadata.route == crate::projects::metadata::RouteStrategy::NodeProxy
+                    && process_id == "web"
+                    && !p.definition.port
+                {
+                    return fail(
+                        "The web process requires a managed port and owned-listener health check",
+                    );
+                }
+                if operation == "restart" {
+                    self.supervisor.stop(&self.store, &p.key)?;
+                }
+                // The explicit command authorizes this definition only after it validates.
+                self.start_project_process(&site, p)?;
+                crate::projects::processes::enable(&self.store, &site, process_id, true)?;
+                self.store
+                    .set_setting(&format!("site.{id}.disabled"), "false")?;
+                self.active = true;
+            }
+            "stop" => {
+                crate::projects::processes::enable(&self.store, &site, process_id, false)?;
+                self.supervisor
+                    .stop(&self.store, &format!("site:{id}:{process_id}"))?;
+            }
+            "remove" => {
+                self.supervisor
+                    .stop(&self.store, &format!("site:{id}:{process_id}"))?;
+                self.store.conn.execute(
+                    "DELETE FROM project_processes WHERE site_id=?1 AND id=?2",
+                    rusqlite::params![id, process_id],
+                )?;
+            }
+            _ => return fail("Unknown process operation"),
+        }
+        if self.active {
+            self.start_required()?;
+        }
+        Ok(())
+    }
+    pub fn site_action(&mut self, id: &str, operation: &str) -> Result<()> {
+        let site = self.site(id)?;
+        if !["start", "stop", "restart"].contains(&operation) {
+            return fail("Unknown site operation");
+        }
+        if operation != "start" {
+            for p in &site.processes {
+                self.supervisor.stop(&self.store, &p.key)?;
+            }
+        }
+        self.store.set_setting(
+            &format!("site.{id}.disabled"),
+            if operation == "stop" { "true" } else { "false" },
+        )?;
+        if operation != "stop"
+            && site.metadata.route == crate::projects::metadata::RouteStrategy::NodeProxy
+        {
+            if !site.processes.iter().any(|p| p.definition.id == "web") {
+                return fail(
+                    "No dev/start script was detected. Add a structured web process with a managed port before starting",
+                );
+            }
+            return self.process_action(id, "web", operation);
+        }
+        self.active = true;
+        self.start_required()
+    }
+    pub fn install_dependencies(&mut self, id: &str, manager: &str) -> Result<()> {
+        let site = self.site(id)?;
+        if site.metadata.error.is_some() {
+            return fail(site.metadata.error.as_deref().unwrap());
+        }
+        let d = match manager {
+            "pnpm" => {
+                if !std::path::Path::new(&site.project_path)
+                    .join("package.json")
+                    .is_file()
+                {
+                    return fail("No package.json in this project");
+                }
+                crate::projects::processes::Definition::script("dependencies", "dev", false)
+            }
+            "composer" => {
+                if !std::path::Path::new(&site.project_path)
+                    .join("composer.json")
+                    .is_file()
+                {
+                    return fail("No composer.json in this project");
+                }
+                let mut d = crate::projects::processes::Definition::artisan("dependencies", vec![]);
+                d.executable = "composer".into();
+                d
+            }
+            _ => {
+                return fail(
+                    "Choose managed pnpm or Composer; npm/yarn projects require their own explicit workflow",
+                );
+            }
+        };
+        let mut d = d;
+        d.args = vec!["install".into()];
+        let spec = crate::tools::command(&self.store, &self.home, &site, &d, None)?;
+        let result = crate::process::run_logged(
+            &spec.binary,
+            &spec.args,
+            &spec.cwd,
+            &spec.env,
+            Duration::from_secs(600),
+            &spec.log,
+        );
+        self.scan()?;
+        result
     }
     fn start_php(&mut self, runtime: &Installation) -> Result<()> {
         if self.supervisor.contains(&runtime.id) {
