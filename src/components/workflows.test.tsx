@@ -125,7 +125,7 @@ describe("desktop setup and configuration presentation", () => {
     expect(html).toContain("Not installed");
     expect(html).toContain("Change Runtime");
   });
-  it("shows incomplete real state and retry controls without reporting trust", () => {
+  it("shows the first setup step and errors as a full page without premature trust", () => {
     const html = renderToStaticMarkup(
       <Setup
         data={data}
@@ -138,8 +138,12 @@ describe("desktop setup and configuration presentation", () => {
       />,
     );
     expect(html).toContain("DNS TCP 53 conflict");
-    expect(html).toContain("Retry DNS");
-    expect(html).toContain("ยังไม่มี trust");
+    expect(html).toContain('class="setup-page"');
+    expect(html).not.toContain('class="overlay"');
+    expect(html).not.toContain('class="dialog');
+    expect(html).toContain("ขั้นตอน 1 จาก 7");
+    expect(html).toContain("เปิด www");
+    expect(html).not.toContain("Windows เชื่อถือแล้ว");
     expect(html).toContain("disabled");
   });
   it("prefills saved PHP directives and exposes only discovered extension files", () => {

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type {
   Snapshot,
   Action,
@@ -5,6 +6,15 @@ import type {
   InstallProgress,
 } from "../contracts";
 import { SetupRuntime } from "./SetupRuntime";
+const steps = [
+  "Home",
+  "Caddy",
+  "PHP",
+  "MySQL",
+  "DNS",
+  "HTTPS",
+  "พร้อมเริ่มงาน",
+];
 export function Setup({
   data,
   busy,
@@ -22,111 +32,239 @@ export function Setup({
   importRuntime: (k: RuntimeKind) => void;
   close: () => void;
 }) {
+  const [step, setStep] = useState(0);
   const s = data.setup;
+  const ready = [
+    s.home_ready,
+    s.caddy,
+    s.php,
+    s.mysql,
+    s.dns_policy && s.dns_server && s.dns_system,
+    s.ca_present && s.ca_trusted,
+  ];
+  const allReady = ready.every(Boolean);
+  const runtime =
+    step >= 1 && step <= 3
+      ? (["caddy", "php", "mysql"] as const)[step - 1]
+      : null;
   return (
-    <div className="overlay">
-      <section className="dialog setup-dialog">
-        <h2>ตั้งค่า DEVONE Local</h2>
-        {busy && progress && (
-          <p role="status">
-            {progress.runtime} · {progress.phase} ·{" "}
-            {progress.bytes.toLocaleString()} bytes{" "}
-            {progress.total ? "/ " + progress.total.toLocaleString() : ""}
+    <section className="setup-page" aria-label="ตั้งค่า DEVONE Local">
+      <header className="setup-header">
+        <div className="brand">
+          <span className="brand-mark">D</span>
+          <div>
+            DEVONE<span>LOCAL DEVELOPMENT</span>
+          </div>
+        </div>
+        <button disabled={busy} onClick={close}>
+          ตั้งค่าภายหลัง
+        </button>
+      </header>
+      <div className="setup-layout">
+        <div className="setup-intro">
+          <p className="eyebrow">เริ่มต้นใช้งาน</p>
+          <h1>ตั้งค่า DEVONE Local</h1>
+          <p>เตรียมพื้นที่ทำงานทีละขั้น กลับมาแก้ไขได้จาก Settings</p>
+        </div>
+        <nav className="setup-steps" aria-label="ขั้นตอนการตั้งค่า">
+          {steps.map((label, index) => (
+            <button
+              key={label}
+              disabled={busy}
+              aria-current={index === step ? "step" : undefined}
+              className={index === step ? "setup-step current" : "setup-step"}
+              onClick={() => setStep(index)}
+            >
+              <span
+                className={ready[index] ? "step-number ready" : "step-number"}
+              >
+                {ready[index] ? "✓" : index + 1}
+              </span>
+              {label}
+            </button>
+          ))}
+        </nav>
+        <div className="setup-stage" aria-live="polite">
+          <p className="setup-position">
+            ขั้นตอน {step + 1} จาก {steps.length}
           </p>
-        )}
-        <p>
-          ตั้งค่าครั้งเดียว แอปทำงานด้วยสิทธิ์ผู้ใช้ปกติ เปิดกลับมาตรวจหรือ
-          retry ได้จาก Settings
-        </p>
-        <div className="settings-row">
-          <div>
-            <strong>1. DEVONE Home</strong>
-            <p>
-              <code>{data.home}</code> ·{" "}
-              {s.home_ready ? "พร้อมใช้งาน" : "ยังไม่พร้อม"}
+          {step === 0 && (
+            <>
+              <h2>พื้นที่สำหรับโปรเจกต์ของคุณ</h2>
+              <p>
+                DEVONE เก็บโปรเจกต์ runtimes ฐานข้อมูล และการตั้งค่าไว้ใน Home
+                นี้
+              </p>
+              <div className="setup-home">
+                <code>{data.home}</code>
+                <span>{s.home_ready ? "พร้อมใช้งาน" : "ยังไม่พร้อม"}</span>
+              </div>
+              <p>
+                วางโฟลเดอร์โปรเจกต์ใน www แล้ว DEVONE
+                จะค้นพบโปรเจกต์ให้อัตโนมัติ
+              </p>
+              <button
+                disabled={busy}
+                onClick={() => void act({ type: "open_folder", site_id: null })}
+              >
+                เปิด www
+              </button>
+            </>
+          )}
+          {runtime && (
+            <>
+              <h2>
+                {runtime === "caddy"
+                  ? "เตรียมเว็บเซิร์ฟเวอร์"
+                  : runtime === "php"
+                    ? "เลือก PHP เริ่มต้น"
+                    : "เลือกฐานข้อมูล MySQL"}
+              </h2>
+              <SetupRuntime
+                key={runtime}
+                data={data}
+                kind={runtime}
+                busy={busy}
+                act={act}
+                importRuntime={importRuntime}
+              />
+            </>
+          )}
+          {step === 4 && (
+            <>
+              <h2>เปิดโปรเจกต์ด้วยชื่อ .test</h2>
+              <p>
+                เช่น demo.test จะชี้ไปที่เครื่องนี้ Windows จะขอสิทธิ์ UAC
+                เฉพาะตอนตั้งค่า DNS ส่วนตัวแอปยังทำงานด้วยสิทธิ์ผู้ใช้ปกติ
+              </p>
+              <dl className="setup-checks">
+                <div>
+                  <dt>DNS policy</dt>
+                  <dd>{s.dns_policy ? "ติดตั้งแล้ว" : "ต้องตั้งค่า"}</dd>
+                </div>
+                <div>
+                  <dt>Resolver</dt>
+                  <dd>{s.dns_server ? "ทำงานอยู่" : "ตรวจพอร์ต UDP/TCP 53"}</dd>
+                </div>
+                <div>
+                  <dt>Windows lookup</dt>
+                  <dd>
+                    {s.dns_system && s.dns_server
+                      ? "พร้อมใช้งาน"
+                      : "กำลังตรวจ / ยังไม่พร้อม"}
+                  </dd>
+                </div>
+              </dl>
+              <button disabled={busy} onClick={() => void act({ type: "dns" })}>
+                ตั้งค่า / Retry DNS
+              </button>
+            </>
+          )}
+          {step === 5 && (
+            <>
+              <h2>ใช้งาน HTTPS ในเครื่อง</h2>
+              <p>
+                สร้าง Local CA แล้วติดตั้ง trust ในบัญชี Windows นี้
+                เพื่อเปิดโปรเจกต์ผ่าน HTTPS
+              </p>
+              <dl className="setup-checks">
+                <div>
+                  <dt>Local CA</dt>
+                  <dd>{s.ca_present ? "สร้างแล้ว" : "ยังไม่ได้สร้าง"}</dd>
+                </div>
+                <div>
+                  <dt>Windows trust</dt>
+                  <dd>{s.ca_trusted ? "เชื่อถือแล้ว" : "ยังไม่ได้ติดตั้ง"}</dd>
+                </div>
+              </dl>
+              {!s.caddy && <p>ติดตั้ง Caddy ในขั้นตอนที่ 2 ก่อนสร้าง CA</p>}
+              <div className="actions">
+                <button
+                  disabled={busy || !s.caddy}
+                  onClick={() => void act({ type: "prepare_ca" })}
+                >
+                  สร้าง / ตรวจ CA
+                </button>
+                <button
+                  disabled={busy || !s.ca_present}
+                  onClick={() => void act({ type: "trust" })}
+                >
+                  ติดตั้ง trust
+                </button>
+              </div>
+            </>
+          )}
+          {step === 6 && (
+            <>
+              <h2>
+                {allReady ? "พร้อมเริ่มทำงานแล้ว" : "ตรวจความพร้อมก่อนเริ่ม"}
+              </h2>
+              <dl className="setup-checks setup-summary">
+                {steps.slice(0, 6).map((label, index) => (
+                  <div key={label}>
+                    <dt>{label}</dt>
+                    <dd>{ready[index] ? "พร้อม" : "ยังไม่พร้อม"}</dd>
+                  </div>
+                ))}
+              </dl>
+              <p>
+                {allReady
+                  ? "วางโปรเจกต์ใน www แล้วเปิดจากหน้า Sites ได้เลย"
+                  : "เลือกขั้นตอนด้านบนเพื่อแก้ไข หรือข้ามส่วนที่ยังไม่พร้อมแล้วกลับมาตั้งค่าภายหลัง"}
+              </p>
+            </>
+          )}
+          {busy && progress && (
+            <p className="setup-progress" role="status">
+              {progress.runtime} · {progress.phase} ·{" "}
+              {progress.bytes.toLocaleString()} bytes{" "}
+              {progress.total ? "/ " + progress.total.toLocaleString() : ""}
             </p>
-          </div>
+          )}
+          {error && (
+            <p className="error" role="alert">
+              {error}
+            </p>
+          )}
+        </div>
+        <footer className="setup-controls">
           <button
-            onClick={() => void act({ type: "open_folder", site_id: null })}
+            disabled={busy || step === 0}
+            onClick={() => setStep(step - 1)}
           >
-            เปิด www
+            ย้อนกลับ
           </button>
-        </div>
-        <div className="settings-row">
-          <div>
-            <strong>2. Wildcard DNS *.test</strong>
-            <p>
-              System lookup:{" "}
-              {s.dns_system ? "พร้อม" : "กำลังตรวจ / ยังไม่พร้อม"} · Policy:{" "}
-              {s.dns_policy ? "พร้อม" : "ต้องตั้งค่า"} · Resolver:{" "}
-              {s.dns_server ? "พร้อม" : "ตรวจพอร์ต UDP/TCP 53"}
-              <br />
-              ตอบเฉพาะ .test → 127.0.0.1 การตั้งค่า Windows แสดง UAC ครั้งเดียว
-            </p>
-          </div>
-          <button disabled={busy} onClick={() => void act({ type: "dns" })}>
-            ตั้งค่า / Retry DNS
-          </button>
-        </div>
-        {(["caddy", "php", "mysql"] as const).map((kind) => (
-          <SetupRuntime
-            key={kind}
-            data={data}
-            kind={kind}
-            busy={busy}
-            act={act}
-            importRuntime={importRuntime}
-          />
-        ))}
-        <div className="settings-row">
-          <div>
-            <strong>3. HTTPS และ Local CA</strong>
-            <p>
-              {s.ca_present ? "สร้าง CA แล้ว" : "ยังไม่ได้สร้าง CA"} ·{" "}
-              {s.ca_trusted
-                ? "Windows เชื่อถือแล้ว"
-                : "ยังไม่มี trust ในบัญชีผู้ใช้นี้"}
-            </p>
-          </div>
           <div className="actions">
-            <button
-              disabled={busy || !s.caddy}
-              onClick={() => void act({ type: "prepare_ca" })}
-            >
-              สร้าง / ตรวจ CA
-            </button>
-            <button
-              disabled={busy || !s.ca_present}
-              onClick={() => void act({ type: "trust" })}
-            >
-              ติดตั้ง trust
-            </button>
+            {step < 6 ? (
+              <button
+                className="primary"
+                disabled={busy}
+                onClick={() => setStep(step + 1)}
+              >
+                ถัดไป
+              </button>
+            ) : (
+              <>
+                <button
+                  disabled={busy}
+                  onClick={() => void act({ type: "finish_setup", skip: true })}
+                >
+                  ข้ามส่วนที่ยังไม่พร้อม
+                </button>
+                <button
+                  className="primary"
+                  disabled={busy || !allReady}
+                  onClick={() =>
+                    void act({ type: "finish_setup", skip: false })
+                  }
+                >
+                  เสร็จสิ้นและเปิด environment
+                </button>
+              </>
+            )}
           </div>
-        </div>
-        {error && (
-          <p className="error" role="alert">
-            {error}
-          </p>
-        )}
-        <div className="actions">
-          <button disabled={busy} onClick={close}>
-            จัดการ runtimes / Settings
-          </button>
-          <button
-            disabled={busy}
-            onClick={() => void act({ type: "finish_setup", skip: true })}
-          >
-            ข้ามส่วนที่ยังไม่พร้อม
-          </button>
-          <button
-            className="primary"
-            disabled={busy}
-            onClick={() => void act({ type: "finish_setup", skip: false })}
-          >
-            เสร็จสิ้นและเปิด environment
-          </button>
-        </div>
-      </section>
-    </div>
+        </footer>
+      </div>
+    </section>
   );
 }

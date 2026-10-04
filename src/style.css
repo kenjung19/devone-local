@@ -570,10 +570,134 @@ footer span {
     flex-wrap: wrap;
   }
 }
-.setup-dialog {
-  max-width: 860px;
-  max-height: 90vh;
-  overflow-y: auto;
+.setup-page {
+  min-height: 100vh;
+  background: #10141c;
+}
+.setup-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 32px;
+  border-bottom: 1px solid #293142;
+}
+.setup-header .brand {
+  margin: 0;
+}
+.setup-layout {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 16px 32px;
+}
+.setup-intro h1 {
+  margin: 0 0 6px;
+  font-size: 25px;
+}
+.setup-steps {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 6px;
+  margin: 14px 0;
+}
+.setup-step {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  justify-content: center;
+  padding: 8px 6px;
+  background: transparent;
+  border-color: transparent;
+  font-size: 12px;
+}
+.setup-step.current {
+  color: #b5c9ff;
+  background: #202d49;
+  border-color: #4767a4;
+}
+.step-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #2c3546;
+  flex-shrink: 0;
+}
+.step-number.ready {
+  color: #83dcaf;
+  background: #1c3b31;
+}
+.setup-stage {
+  padding: 16px 20px;
+  border: 1px solid #293142;
+  border-radius: 12px;
+  background: #151b26;
+}
+.setup-stage h2 {
+  font-size: 21px;
+  margin-bottom: 12px;
+}
+.setup-position {
+  font-size: 12px;
+  margin-bottom: 10px;
+  color: #8099c2;
+}
+.setup-stage > p + button,
+.setup-stage > p + .actions {
+  margin-top: 18px;
+}
+.setup-home {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 18px 0;
+}
+.setup-home span {
+  flex-shrink: 0;
+  color: #83dcaf;
+}
+.setup-stage .settings-row {
+  padding: 12px 0 0;
+  border: 0;
+}
+.setup-stage .settings-row .actions {
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+.setup-checks {
+  display: block;
+  padding: 0;
+  gap: 0;
+  margin: 12px 0;
+}
+.setup-checks > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 8px 0;
+  border-bottom: 1px solid #293142;
+}
+.setup-checks dt,
+.setup-checks dd {
+  margin: 0;
+}
+.setup-checks dd {
+  color: #a6b7cf;
+}
+.setup-progress,
+.setup-stage .error {
+  margin-top: 16px;
+}
+footer.setup-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 18px 0 0;
+  margin-top: 8px;
+  border: 0;
+  letter-spacing: normal;
+  font-size: inherit;
 }
 .dialog {
   max-height: 90vh;
@@ -592,4 +716,15 @@ fieldset {
   border: 1px solid #ddd;
   border-radius: 8px;
   margin: 12px 0;
+}
+
+.setup-checks.setup-summary {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  column-gap: 28px;
+  row-gap: 0;
+}
+
+.setup-intro .eyebrow {
+  display: none;
 }

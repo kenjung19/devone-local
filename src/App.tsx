@@ -76,6 +76,35 @@ export default function App() {
   };
   const site = data?.sites.find((s) => s.id === selected);
   const count = data ? availableSiteCount(data.sites) : 0;
+  if (data && !data.setup.completed && !setupDismissed) {
+    return (
+      <>
+        <Setup
+          data={data}
+          busy={busy}
+          error={error}
+          progress={progress}
+          act={act}
+          close={() => {
+            setSetupDismissed(true);
+            setPage("Settings");
+          }}
+          importRuntime={setImportKind}
+        />
+        {importKind && (
+          <ImportDialog
+            kind={importKind}
+            data={data}
+            busy={busy}
+            error={error}
+            close={() => setImportKind(null)}
+            act={act}
+          />
+        )}
+      </>
+    );
+  }
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -658,17 +687,6 @@ export default function App() {
           DEVONE LOCAL <span>PHP + MySQL · Phase 1 foundation</span>
         </footer>
       </main>
-      {data && !data.setup.completed && !setupDismissed && (
-        <Setup
-          data={data}
-          busy={busy}
-          error={error}
-          progress={progress}
-          act={act}
-          close={() => setSetupDismissed(true)}
-          importRuntime={setImportKind}
-        />
-      )}
       {importKind && data && (
         <ImportDialog
           kind={importKind}
