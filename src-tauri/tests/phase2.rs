@@ -22,6 +22,9 @@ fn app(root: &Path) -> Application {
     )
     .unwrap()
 }
+#[path = "support/https.rs"]
+mod https;
+
 fn project(root: &Path, name: &str, package: &str) -> std::path::PathBuf {
     let p = root.join("www").join(name);
     std::fs::create_dir_all(&p).unwrap();
@@ -878,9 +881,7 @@ fn native_real_vite_next_and_laravel_vite_protocols() {
         .build()
         .unwrap();
     let get = |url: &str| {
-        client
-            .get(url)
-            .send()
+        https::ready_get(&client, url)
             .unwrap()
             .error_for_status()
             .unwrap()

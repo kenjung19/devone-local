@@ -9,7 +9,7 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::JoinHandle,
@@ -32,7 +32,7 @@ pub struct DesktopInstance {
     home: Home,
     stop: Arc<AtomicBool>,
     activations: Arc<AtomicUsize>,
-    thread: Option<JoinHandle<()>>,
+    thread: Mutex<Option<JoinHandle<()>>>,
 }
 impl DesktopInstance {
     pub fn claim(home: &Home) -> Result<Launch> {
@@ -99,7 +99,7 @@ impl DesktopInstance {
             home: home.clone(),
             stop,
             activations,
-            thread: Some(thread),
+            thread: Mutex::new(Some(thread)),
         }))
     }
     fn activate(home: &Home) -> Result<()> {
@@ -129,19 +129,47 @@ impl DesktopInstance {
     pub fn take_activation(&self) -> bool {
         self.activations.swap(0, Ordering::AcqRel) > 0
     }
+    /// Tauri can terminate the process without dropping stack-owned state.
+    /// Close the activation listener and remove this owner's record before exit.
+    pub fn shutdown(&self) -> Result<()> {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self
+            .thread
+            .lock()
+            .map_err(|_| crate::core::Error::Message("Desktop listener lock poisoned".into()))?
+            .take()
+        {
+            thread.join().map_err(|_| {
+                crate::core::Error::Message("Desktop listener shutdown failed".into())
+            })?;
+        }
+        match std::fs::remove_file(self.home.path("config/desktop-session.json")) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
 }
 impl Drop for DesktopInstance {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-        let _ = std::fs::remove_file(self.home.path("config/desktop-session.json"));
+        let _ = self.shutdown();
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_shutdown_cleans_before_owner_is_dropped() {
+        let d = tempfile::tempdir().unwrap();
+        let h = Home::new(d.path());
+        let Launch::Primary(owner) = DesktopInstance::claim(&h).unwrap() else {
+            panic!()
+        };
+        owner.shutdown().unwrap();
+        assert!(!h.path("config/desktop-session.json").exists());
+        assert!(DesktopInstance::activate(&h).is_err());
+        owner.shutdown().unwrap();
+    }
     #[test]
     fn second_launch_activates_owner_and_stale_record_does_not_lock_home() {
         let d = tempfile::tempdir().unwrap();

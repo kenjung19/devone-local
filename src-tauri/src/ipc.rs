@@ -684,6 +684,18 @@ fn lock(state: &Shared) -> Result<std::sync::MutexGuard<'_, Application>> {
         .lock()
         .map_err(|_| Error::Message("Core state lock was poisoned".into()))
 }
+/// Shared application command boundary for Tauri and explicit acceptance clients.
+pub fn execute_shared(state: &Shared, action: Action) -> Result<Response> {
+    let mut app = lock(state)?;
+    apply(&mut app, action)
+}
+pub fn validate_sql_selection(value: Option<String>) -> Result<Option<String>> {
+    if let Some(path) = &value {
+        crate::database::admin::validate_restore_source(Path::new(path))?;
+    }
+    Ok(value)
+}
+
 #[tauri::command]
 pub async fn snapshot(state: tauri::State<'_, Shared>) -> std::result::Result<Snapshot, String> {
     let shared = state.inner().clone();
@@ -698,13 +710,10 @@ pub async fn execute(
     action: Action,
 ) -> std::result::Result<Response, String> {
     let shared = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut app = lock(&shared)?;
-        apply(&mut app, action)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || execute_shared(&shared, action))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
 }
 #[tauri::command]
 pub async fn log_files(
@@ -812,11 +821,40 @@ mod process_editor_tests {
 #[tauri::command]
 pub async fn select_sql_file() -> std::result::Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(|| -> Result<Option<String>> {
-        if !cfg!(windows) {return crate::core::fail("SQL file selection currently supports Windows");}
-        let windows=std::env::var_os("SystemRoot").ok_or_else(||Error::Message("SystemRoot unavailable".into()))?;
-        let binary=Path::new(&windows).join("System32/WindowsPowerShell/v1.0/powershell.exe");
-        let script="Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.OpenFileDialog; $dialog.Filter = 'SQL dump (*.sql)|*.sql'; $dialog.Title = 'Select a trusted SQL dump for explicit restore'; if ($dialog.ShowDialog() -eq 'OK') { [Console]::Write($dialog.FileName) }";
-        let output=crate::process::run_checked(&binary,&["-NoProfile".into(),"-STA".into(),"-Command".into(),script.into()],Path::new(&windows),&Default::default(),std::time::Duration::from_secs(180))?;
-        let value=output.trim();Ok((!value.is_empty()).then(||value.to_string()))
-    }).await.map_err(|e|e.to_string())?.map_err(|e|e.to_string())
+        let selected =
+            crate::platform::choose_sql_file()?.map(|path| path.to_string_lossy().into_owned());
+        validate_sql_selection(selected)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod sql_selection_tests {
+    use super::*;
+    #[test]
+    fn chooser_and_execution_validate_cancel_external_sql_unsupported_and_disappeared_sources() {
+        let home = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        assert!(validate_sql_selection(None).unwrap().is_none());
+        let source = external.path().join("user-selected.SQL");
+        let bytes = b"CREATE TABLE acceptance(id INT);";
+        std::fs::write(&source, bytes).unwrap();
+        let value = source.to_string_lossy().to_string();
+        assert_eq!(
+            validate_sql_selection(Some(value.clone())).unwrap(),
+            Some(value.clone())
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), bytes);
+        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+        let unsupported = external.path().join("dump.txt");
+        std::fs::write(&unsupported, bytes).unwrap();
+        assert!(validate_sql_selection(Some(unsupported.to_string_lossy().into())).is_err());
+        std::fs::remove_file(&source).unwrap();
+        assert!(crate::database::admin::validate_restore_source(&source).is_err());
+        assert!(validate_sql_selection(Some(value)).is_err());
+        assert!(validate_sql_selection(Some("relative.sql".into())).is_err());
+        assert_eq!(std::fs::read(unsupported).unwrap(), bytes);
+    }
 }

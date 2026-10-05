@@ -18,16 +18,31 @@ pub fn ready() -> bool {
             .as_deref()
             == Some("127.0.0.1")
         && k.get_value::<u32, _>("ConfigOptions").ok() == Some(8)
+        && k.get_value::<u32, _>("Version").ok() == Some(2)
+}
+fn optional_matches<T: winreg::types::FromRegValue + PartialEq>(
+    k: &RegKey,
+    name: &str,
+    expected: T,
+) -> bool {
+    match k.get_value::<T, _>(name) {
+        Ok(value) => value == expected,
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+fn owned_key(k: &RegKey) -> bool {
+    k.get_value::<String, _>("DisplayName").ok().as_deref() == Some(OWNER)
+        && optional_matches(k, "Name", vec![".test".to_string()])
+        && optional_matches(k, "GenericDNSServers", "127.0.0.1".to_string())
+        && optional_matches(k, "ConfigOptions", 8u32)
+        && optional_matches(k, "Version", 2u32)
 }
 fn owned() -> bool {
-    let Ok(k) = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(key_path()) else {
-        return false;
-    };
-    k.get_value::<String, _>("DisplayName").ok().as_deref() == Some(OWNER)
-        && k.get_value::<Vec<String>, _>("Name")
-            .ok()
-            .is_none_or(|names| names == vec![".test".to_string()])
+    RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(key_path())
+        .is_ok_and(|k| owned_key(&k))
 }
+
 fn preflight() -> Result<()> {
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     for base in [
@@ -145,6 +160,32 @@ fn conflicts(namespace: &str) -> bool {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ownership_rejects_changed_servers_namespace_and_invalid_value_types() {
+        use super::*;
+        let path = format!(r"Software\DevoneAcceptance\{}", uuid::Uuid::new_v4());
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        assert!(hkcu.open_subkey(&path).is_err());
+        let (k, _) = hkcu.create_subkey(&path).unwrap();
+        k.set_value("DisplayName", &OWNER).unwrap();
+        assert!(owned_key(&k)); // partial helper write is owned and recoverable
+        k.set_value("Name", &vec![".test".to_string()]).unwrap();
+        k.set_value("GenericDNSServers", &"127.0.0.1").unwrap();
+        k.set_value("ConfigOptions", &8u32).unwrap();
+        k.set_value("Version", &2u32).unwrap();
+        assert!(owned_key(&k));
+        k.set_value("GenericDNSServers", &"203.0.113.53").unwrap();
+        assert!(!owned_key(&k));
+        k.set_value("GenericDNSServers", &"127.0.0.1").unwrap();
+        k.set_value("ConfigOptions", &"invalid type").unwrap();
+        assert!(!owned_key(&k));
+        k.set_value("ConfigOptions", &8u32).unwrap();
+        k.set_value("Name", &vec![".example.com".to_string()])
+            .unwrap();
+        assert!(!owned_key(&k));
+        drop(k);
+        hkcu.delete_subkey_all(path).unwrap();
+    }
     #[test]
     fn foreign_test_namespaces_are_conflicts_but_other_domains_are_not() {
         for name in [

@@ -25,3 +25,6 @@ pub mod setup;
 pub mod phase3;
 
 pub mod desktop_smoke;
+
+#[cfg(feature = "release-acceptance")]
+pub mod release_acceptance;

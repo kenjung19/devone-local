@@ -4,6 +4,8 @@ use devone::{
     projects::processes::Definition,
 };
 use std::{path::Path, time::Duration};
+#[path = "support/https.rs"]
+mod https;
 #[test]
 #[ignore = "Explicit disposable Home with managed PHP/Node/Caddy/pnpm and populated pnpm store; free 80/443"]
 fn copied_php_and_vite_discover_start_https_and_stop() {
@@ -86,10 +88,7 @@ fn copied_php_and_vite_discover_start_https_and_stop() {
             .timeout(Duration::from_secs(20))
             .build()
             .unwrap();
-        let response = client
-            .get(format!("https://{}", site.hostname))
-            .send()
-            .unwrap();
+        let response = https::ready_get(&client, &format!("https://{}", site.hostname)).unwrap();
         assert!(response.status().is_success());
         assert!(
             response

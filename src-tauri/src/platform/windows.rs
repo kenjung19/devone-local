@@ -129,17 +129,19 @@ pub fn sync_hosts(hosts: &[String]) -> Result<()> {
     Ok(())
 }
 pub fn trust_ca(path: &Path) -> Result<()> {
-    let mut cmd = Command::new(system_executable("certutil.exe")?);
-    configure(&mut cmd);
-    let output = cmd
-        .args(["-user", "-addstore", "Root"])
-        .arg(path)
-        .output()?;
-    if !output.status.success() {
-        return fail(String::from_utf8_lossy(&output.stderr).to_string());
-    }
+    // Windows may ask the user to approve a new root. Never leave a backend
+    // worker blocked indefinitely when that confirmation is not completed.
+    crate::process::run_checked(
+        &system_executable("certutil.exe")?,
+        &["-user".into(), "-addstore".into(), "Root".into(), path.to_string_lossy().into()],
+        path.parent().ok_or_else(|| crate::core::Error::Message("CA has no parent directory".into()))?,
+        &BTreeMap::new(), std::time::Duration::from_secs(120),
+    ).map_err(|e| crate::core::Error::Message(format!(
+        "Windows did not confirm installation of the local HTTPS CA. Approve the current-user certificate prompt or retry HTTPS Setup: {e}"
+    )))?;
     Ok(())
 }
+
 pub struct Ownership(HANDLE);
 unsafe impl Send for Ownership {}
 impl Ownership {
@@ -275,8 +277,16 @@ pub fn ca_trusted(path: &Path) -> bool {
             context,
             std::ptr::null(),
         );
-        let trusted = !found.is_null();
-        if trusted {
+        // CERT_FIND_EXISTING matches issuer/serial. Trust requires the exact DER,
+        // not merely another certificate with matching identifying fields.
+        let trusted = !found.is_null()
+            && (*found).cbCertEncoded == (*(context as *const CERT_CONTEXT)).cbCertEncoded
+            && std::slice::from_raw_parts((*found).pbCertEncoded, (*found).cbCertEncoded as usize)
+                == std::slice::from_raw_parts(
+                    (*(context as *const CERT_CONTEXT)).pbCertEncoded,
+                    (*(context as *const CERT_CONTEXT)).cbCertEncoded as usize,
+                );
+        if !found.is_null() {
             CertFreeCertificateContext(found);
         }
         CertCloseStore(store, 0);
@@ -285,7 +295,9 @@ pub fn ca_trusted(path: &Path) -> bool {
     }
 }
 
-pub fn remove_ca_trust(path: &Path) -> Result<()> {
+// Resolve the exact encoded certificate to a full SHA-1 store identifier. This is
+// a Windows store lookup key, not the SHA-256 file ownership record used by TLS.
+fn certificate_store_id(path: &Path) -> Result<String> {
     use windows_sys::Win32::Security::Cryptography::*;
     let wide: Vec<u16> = path
         .to_string_lossy()
@@ -310,35 +322,46 @@ pub fn remove_ca_trust(path: &Path) -> Result<()> {
         {
             return Err(std::io::Error::last_os_error().into());
         }
-        let name: Vec<u16> = "ROOT".encode_utf16().chain(Some(0)).collect();
-        let store = CertOpenStore(
-            CERT_STORE_PROV_SYSTEM_W,
-            0,
-            0,
-            CERT_SYSTEM_STORE_CURRENT_USER,
-            name.as_ptr() as *const _,
+        let mut hash = [0u8; 20];
+        let mut length = hash.len() as u32;
+        let ok = CertGetCertificateContextProperty(
+            context as *const CERT_CONTEXT,
+            CERT_SHA1_HASH_PROP_ID,
+            hash.as_mut_ptr() as *mut _,
+            &mut length,
         );
-        if store.is_null() {
-            CertFreeCertificateContext(context as *const CERT_CONTEXT);
-            return Err(std::io::Error::last_os_error().into());
-        }
-        let found = CertFindCertificateInStore(
-            store,
-            X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
-            0,
-            CERT_FIND_EXISTING,
-            context,
-            std::ptr::null(),
-        );
-        // Deletion consumes only the exact matching certificate context.
-        let success = found.is_null() || CertDeleteCertificateFromStore(found) != 0;
-        CertCloseStore(store, 0);
+        let error = std::io::Error::last_os_error();
         CertFreeCertificateContext(context as *const CERT_CONTEXT);
-        if !success {
-            return fail(
-                "Could not remove the exact DEVONE certificate from the current user store",
-            );
+        if ok == 0 {
+            return Err(error.into());
         }
+        if length != 20 {
+            return fail("Invalid certificate store fingerprint");
+        }
+        Ok(hash.iter().map(|b| format!("{b:02x}")).collect())
+    }
+}
+
+pub fn remove_ca_trust(path: &Path) -> Result<()> {
+    // CertDeleteCertificateFromStore on the protected logical Root store can
+    // open a modal Windows confirmation on the backend worker. DEVONE already
+    // confirms this action in Settings and verifies its SHA-256 ownership record.
+    // certutil uses an exact full fingerprint, CurrentUser only, with a bounded
+    // process lifetime. Never pass a subject, serial number, index or wildcard.
+    let id = certificate_store_id(path)?;
+    if !ca_trusted(path) {
+        return Ok(());
+    }
+    crate::process::run_checked(
+        &system_executable("certutil.exe")?,
+        &["-user".into(), "-delstore".into(), "Root".into(), id],
+        path.parent()
+            .ok_or_else(|| crate::core::Error::Message("CA has no parent directory".into()))?,
+        &BTreeMap::new(),
+        std::time::Duration::from_secs(15),
+    )?;
+    if ca_trusted(path) {
+        return fail("The exact DEVONE CA is still trusted; no other certificate was removed");
     }
     Ok(())
 }
@@ -505,6 +528,42 @@ fn listener_owned_by(port: u16, owns: impl Fn(u32) -> bool) -> bool {
         })
     }
 }
+/// Native Windows chooser; no PowerShell, developer toolchain or source scripts.
+pub fn choose_sql_file() -> Result<Option<PathBuf>> {
+    use windows_sys::Win32::UI::Controls::Dialogs::*;
+    let mut file = vec![0u16; 32768];
+    let filter: Vec<u16> = "SQL dump (*.sql)\0*.sql\0\0".encode_utf16().collect();
+    let title: Vec<u16> = "Select a trusted SQL dump for explicit restore\0"
+        .encode_utf16()
+        .collect();
+    let extension: Vec<u16> = "sql\0".encode_utf16().collect();
+    unsafe {
+        let mut dialog: OPENFILENAMEW = std::mem::zeroed();
+        dialog.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+        dialog.lpstrFilter = filter.as_ptr();
+        dialog.lpstrFile = file.as_mut_ptr();
+        dialog.nMaxFile = file.len() as u32;
+        dialog.lpstrTitle = title.as_ptr();
+        dialog.lpstrDefExt = extension.as_ptr();
+        dialog.Flags =
+            OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_DONTADDTORECENT;
+        if GetOpenFileNameW(&mut dialog) == 0 {
+            let error = CommDlgExtendedError();
+            return if error == 0 {
+                Ok(None)
+            } else {
+                fail(format!(
+                    "Windows could not open the SQL chooser (code {error}); retry selection"
+                ))
+            };
+        }
+    }
+    let length = file.iter().position(|v| *v == 0).unwrap_or(file.len());
+    Ok(Some(PathBuf::from(String::from_utf16_lossy(
+        &file[..length],
+    ))))
+}
+
 #[cfg(test)]
 mod secret_tests {
     #[test]

@@ -94,11 +94,23 @@ impl TlsProvider for CaddyTls {
             return fail("Caddy CA is not generated yet. Start a configured site first.");
         }
         let fingerprint = fingerprint(&path)?;
+        if store
+            .setting("tls.ca_fingerprint")?
+            .is_some_and(|recorded| !recorded.is_empty() && recorded != fingerprint)
+        {
+            return fail(
+                "CA identity changed. Restore the recorded CA before changing trust; existing ownership was preserved",
+            );
+        }
         if store.setting("tls.ca_fingerprint")?.as_deref() == Some(&fingerprint)
             && crate::platform::ca_trusted(&path)
         {
             return Ok(());
         }
+        // Record exact ownership before the OS mutation. A cancelled/timed-out
+        // installation can still have added the root, so removal must remain
+        // possible even when the installation command reports an error.
+        store.set_setting("tls.ca_fingerprint", &fingerprint)?;
         crate::platform::trust_ca(&path)?;
         if !crate::platform::ca_trusted(&path) {
             return fail(
@@ -129,6 +141,9 @@ mod tests {
         verify_owned(&s, &h).unwrap();
         std::fs::write(&p, b"foreign replacement").unwrap();
         assert!(verify_owned(&s, &h).is_err());
+        let recorded = s.setting("tls.ca_fingerprint").unwrap();
+        assert!(CaddyTls.trust(&s, &h).is_err());
+        assert_eq!(s.setting("tls.ca_fingerprint").unwrap(), recorded);
         assert!(recreate(&s, &h, false).is_err());
         assert_eq!(std::fs::read(p).unwrap(), b"foreign replacement");
     }

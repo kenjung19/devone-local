@@ -49,7 +49,16 @@ pub fn state(store: &Store, home: &Home) -> Result<State> {
         ca_trusted: crate::platform::ca_trusted(&ca),
         caddy: has(RuntimeType::Caddy),
         php: has(RuntimeType::Php),
-        mysql: has(RuntimeType::Mysql),
+        mysql: has(RuntimeType::Mysql)
+            && store.setting("default.mysql")?.is_some_and(|version| {
+                crate::database::instances(store).is_ok_and(|instances| {
+                    instances.iter().any(|instance| {
+                        instance.runtime_id == format!("mysql:{version}")
+                            && instance.initialized
+                            && home.path(&instance.data_path).is_dir()
+                    })
+                })
+            }),
     })
 }
 pub fn finish(store: &Store, home: &Home, skip: bool) -> Result<()> {

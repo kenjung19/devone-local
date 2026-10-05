@@ -24,6 +24,7 @@ export function Setup({
   act,
   importRuntime,
   close,
+  initialStep = 0,
 }: {
   data: Snapshot;
   busy: boolean;
@@ -32,8 +33,9 @@ export function Setup({
   act: (a: Action) => Promise<void>;
   importRuntime: (k: RuntimeKind) => void;
   close: () => void;
+  initialStep?: number;
 }) {
-  const [step, setStep] = useState(0);
+  const [step, setStep] = useState(initialStep);
   const s = data.setup;
   const ready = [
     s.home_ready,

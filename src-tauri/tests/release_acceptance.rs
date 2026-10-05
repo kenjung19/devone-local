@@ -1,3 +1,5 @@
+#[path = "support/machine.rs"]
+mod machine;
 use devone::{
     app::{Application, Options},
     config::Home,
@@ -7,13 +9,13 @@ use devone::{
 };
 use std::{collections::BTreeMap, path::Path, time::Duration};
 #[test]
-#[ignore = "Two explicit PHP fixtures, Caddy and free 80/443"]
+#[ignore = "Catalog download or optional PHP/Caddy fixtures; exclusive free 80/443"]
 fn two_php_versions_config_and_scoped_terminal() {
     php_acceptance(false);
 }
 
 #[test]
-#[ignore = "Requires explicit DEVONE_ACCEPT_SYSTEM_CA=1 and interactive Windows CA removal confirmation"]
+#[ignore = "Requires explicit DEVONE_ACCEPT_SYSTEM_CA=1; exact current-user CA lifecycle with verified cleanup"]
 fn disposable_current_user_ca_and_system_https() {
     assert_eq!(std::env::var("DEVONE_ACCEPT_SYSTEM_CA").as_deref(), Ok("1"));
     php_acceptance(true);
@@ -31,14 +33,21 @@ fn php_acceptance(system_ca: bool) {
     )
     .unwrap();
     let mut versions = Vec::new();
-    for (kind, var) in [
-        (RuntimeType::Php, "DEVONE_ACCEPT_PHP_A"),
-        (RuntimeType::Php, "DEVONE_ACCEPT_PHP_B"),
-        (RuntimeType::Caddy, "DEVONE_CADDY_SOURCE"),
+    for (kind, var, version) in [
+        (RuntimeType::Php, "DEVONE_ACCEPT_PHP_A", "8.4.26"),
+        (RuntimeType::Php, "DEVONE_ACCEPT_PHP_B", "8.5.11"),
+        (RuntimeType::Caddy, "DEVONE_CADDY_SOURCE", "2.11.7"),
     ] {
-        let path = std::env::var(var).unwrap();
-        let m = runtime::inspect_import(kind.clone(), Path::new(&path)).unwrap();
-        let item = a.import(m, Path::new(&path)).unwrap();
+        let item = if let Ok(path) = std::env::var(var) {
+            let m = runtime::inspect_import(kind.clone(), Path::new(&path)).unwrap();
+            a.import(m, Path::new(&path)).unwrap()
+        } else {
+            a.install(devone::core::RuntimeRef {
+                kind: kind.clone(),
+                version: version.into(),
+            })
+            .unwrap()
+        };
         a.set_default(item.reference()).unwrap();
         if kind == RuntimeType::Php {
             versions.push(item);
@@ -132,19 +141,11 @@ fn php_acceptance(system_ca: bool) {
         assert_eq!(output.trim(), site.resolved["php"]);
     }
     if system_ca {
-        struct Cleanup<'a> {
-            a: &'a mut Application,
-        }
-        impl Drop for Cleanup<'_> {
-            fn drop(&mut self) {
-                let _ = self.a.stop_all();
-                let _ = devone::tls::remove_trust(&self.a.store, &self.a.home);
-            }
-        }
-        let guard = Cleanup { a: &mut a };
+        let mut guard = machine::MachineGuard::new(a).unwrap();
+        guard.track_ca().unwrap();
         let path = CaddyTls.ca_path(&home);
         assert!(!devone::platform::ca_trusted(&path));
-        CaddyTls.trust(&guard.a.store, &home).unwrap();
+        CaddyTls.trust(&guard.app.store, &home).unwrap();
         assert!(devone::platform::ca_trusted(&path));
         let curl = devone::platform::system_executable("curl.exe").unwrap();
         let output = devone::process::run_checked(
@@ -166,12 +167,230 @@ fn php_acceptance(system_ca: bool) {
         )
         .unwrap();
         assert_eq!(output.trim(), versions[0].manifest.version);
-        devone::tls::remove_trust(&guard.a.store, &home).unwrap();
+        let recorded = guard
+            .app
+            .store
+            .setting("tls.ca_fingerprint")
+            .unwrap()
+            .unwrap();
+        guard
+            .app
+            .store
+            .set_setting("tls.ca_fingerprint", "foreign-identity")
+            .unwrap();
+        assert!(devone::tls::remove_trust(&guard.app.store, &home).is_err());
+        assert!(devone::platform::ca_trusted(&path));
+        guard
+            .app
+            .store
+            .set_setting("tls.ca_fingerprint", &recorded)
+            .unwrap();
+        devone::tls::remove_trust(&guard.app.store, &home).unwrap();
         assert!(!devone::platform::ca_trusted(&path));
+        devone::tls::remove_trust(&guard.app.store, &home).unwrap(); // idempotent
+        assert!(
+            devone::process::run_checked(
+                &curl,
+                &[
+                    "--ssl-no-revoke".into(),
+                    "--noproxy".into(),
+                    "*".into(),
+                    "--resolve".into(),
+                    "accept-php-a.test:443:127.0.0.1".into(),
+                    "--fail".into(),
+                    "--silent".into(),
+                    "--show-error".into(),
+                    "https://accept-php-a.test".into()
+                ],
+                home.root(),
+                &BTreeMap::new(),
+                Duration::from_secs(15)
+            )
+            .is_err(),
+            "System HTTPS must reject a removed root"
+        );
         let old = devone::tls::fingerprint(&path).unwrap();
-        guard.a.recreate_ca(true).unwrap();
+        guard.app.recreate_ca(true).unwrap();
         assert_ne!(devone::tls::fingerprint(&path).unwrap(), old);
         assert!(!devone::platform::ca_trusted(&path));
+        guard.cleanup().unwrap();
+    } else {
+        a.shutdown().unwrap();
     }
-    a.shutdown().unwrap();
+}
+
+#[test]
+#[ignore = "DEVONE_ACCEPT_SYSTEM_CA=1; catalog or optional Caddy fixture, exact current-user Root cleanup after actual trust and panic"]
+fn system_ca_guard_cleans_after_panic() {
+    assert_eq!(std::env::var("DEVONE_ACCEPT_SYSTEM_CA").as_deref(), Ok("1"));
+    let before = machine::user_roots().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let home = Home::new(d.path());
+    let app = Application::open_with_options(
+        home.clone(),
+        Options {
+            system_setup: false,
+            autostart: false,
+        },
+    )
+    .unwrap();
+    let mut guard = machine::MachineGuard::new(app).unwrap();
+    let caddy = if let Ok(source) = std::env::var("DEVONE_CADDY_SOURCE") {
+        let manifest = runtime::inspect_import(RuntimeType::Caddy, Path::new(&source)).unwrap();
+        guard.app.import(manifest, Path::new(&source)).unwrap()
+    } else {
+        guard
+            .app
+            .install(devone::core::RuntimeRef {
+                kind: RuntimeType::Caddy,
+                version: "2.11.7".into(),
+            })
+            .unwrap()
+    };
+    guard.app.set_default(caddy.reference()).unwrap();
+    devone::setup::prepare_ca(&guard.app.store, &home).unwrap();
+    guard.track_ca().unwrap();
+    let installed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed_install = installed.clone();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        CaddyTls.trust(&guard.app.store, &home).unwrap();
+        assert!(devone::platform::ca_trusted(&CaddyTls.ca_path(&home)));
+        observed_install.store(true, std::sync::atomic::Ordering::Release);
+        panic!("controlled acceptance failure after CA installation");
+    }));
+    assert!(result.is_err());
+    assert_eq!(machine::user_roots().unwrap(), before);
+    assert!(
+        installed.load(std::sync::atomic::Ordering::Acquire),
+        "CA installation did not complete; panic cleanup after actual trust was not exercised"
+    );
+}
+#[test]
+#[ignore = "Exclusive free loopback port 53; no system policy mutation"]
+fn dns_port53_conflicts_preserve_foreign_listeners_and_retry() {
+    use devone::dns::server::Resolver;
+    use std::net::{TcpListener, UdpSocket};
+    let foreign = UdpSocket::bind(("127.0.0.1", 53)).unwrap();
+    assert!(
+        Resolver::start(53)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("UDP 53 conflict")
+    );
+    assert_eq!(foreign.local_addr().unwrap().port(), 53);
+    drop(foreign);
+    let foreign = TcpListener::bind(("127.0.0.1", 53)).unwrap();
+    assert!(
+        Resolver::start(53)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("TCP 53 conflict")
+    );
+    assert_eq!(foreign.local_addr().unwrap().port(), 53);
+    drop(foreign);
+    let resolver = Resolver::start(53).unwrap();
+    devone::dns::server::probe(53).unwrap();
+    drop(resolver);
+    let resolver = Resolver::start(53).unwrap();
+    devone::dns::server::probe(53).unwrap();
+    drop(resolver);
+}
+
+#[test]
+#[ignore = "DEVONE_ACCEPT_SYSTEM_DNS=1, elevated Windows invocation, no existing DEVONE policy, exclusive free port 53"]
+fn disposable_elevated_windows_dns_policy_lifecycle() {
+    assert_eq!(
+        std::env::var("DEVONE_ACCEPT_SYSTEM_DNS").as_deref(),
+        Ok("1")
+    );
+    assert!(
+        unsafe { windows_sys::Win32::UI::Shell::IsUserAnAdmin() } != 0,
+        "Run scripts\\acceptance\\windows-dns.cmd from CMD as Administrator; no policy was changed"
+    );
+    use windows_sys::Win32::NetworkManagement::Dns::*;
+    fn query(host: &str) -> Vec<[u8; 4]> {
+        let name: Vec<u16> = host.encode_utf16().chain(Some(0)).collect();
+        unsafe {
+            let mut records = std::ptr::null_mut();
+            let code = DnsQuery_W(
+                name.as_ptr(),
+                DNS_TYPE_A,
+                DNS_QUERY_BYPASS_CACHE | DNS_QUERY_NO_HOSTS_FILE,
+                std::ptr::null_mut(),
+                &mut records,
+                std::ptr::null_mut(),
+            );
+            let mut addresses = vec![];
+            let mut record = records;
+            while !record.is_null() {
+                if (*record).wType == DNS_TYPE_A {
+                    addresses.push((*record).Data.A.IpAddress.to_ne_bytes());
+                }
+                record = (*record).pNext;
+            }
+            if !records.is_null() {
+                DnsFree(records as *const _, DnsFreeRecordList);
+            }
+            if code == 0 { addresses } else { vec![] }
+        }
+    }
+    let d = tempfile::tempdir().unwrap();
+    let app = Application::open_with_options(
+        Home::new(d.path()),
+        Options {
+            system_setup: true,
+            autostart: false,
+        },
+    )
+    .unwrap();
+    let mut guard = machine::MachineGuard::new(app).unwrap();
+    assert!(
+        guard.app.dns_owned(),
+        "Port 53 unavailable; foreign listeners were not touched"
+    );
+    guard.track_dns().unwrap();
+    devone::platform::configure_wildcard_elevated(false).unwrap();
+    assert!(devone::platform::wildcard_ready());
+    devone::platform::configure_wildcard_elevated(false).unwrap(); // owned policy is idempotent
+    let host = format!("accept-{}.test", uuid::Uuid::new_v4().simple());
+    assert_eq!(query(&host), vec![[127, 0, 0, 1]]);
+    assert!(
+        !query("example.com").is_empty(),
+        "Unrelated public DNS must remain usable"
+    );
+    guard.app.shutdown().unwrap();
+    assert!(devone::dns::server::probe(53).is_err());
+    let other = tempfile::tempdir().unwrap();
+    let placeholder = Application::open_with_options(
+        Home::new(other.path()),
+        Options {
+            system_setup: false,
+            autostart: false,
+        },
+    )
+    .unwrap();
+    let previous = std::mem::replace(&mut guard.app, placeholder);
+    drop(previous); // release the Home lock before cold reopen
+    guard.app = Application::open_with_options(
+        Home::new(d.path()),
+        Options {
+            system_setup: true,
+            autostart: false,
+        },
+    )
+    .unwrap();
+    assert!(guard.app.dns_owned());
+    assert_eq!(
+        query(&format!("restart-{}.test", uuid::Uuid::new_v4().simple())),
+        vec![[127, 0, 0, 1]]
+    );
+    devone::platform::configure_wildcard_elevated(true).unwrap();
+    assert!(!devone::platform::wildcard_ready());
+    assert!(
+        !query(&format!("removed-{}.test", uuid::Uuid::new_v4().simple()))
+            .contains(&[127, 0, 0, 1])
+    );
+    guard.cleanup().unwrap();
 }

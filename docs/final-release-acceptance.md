@@ -1,5 +1,8 @@
 # Final Windows release acceptance - 2026-10-05
 
+Historical report. The subsequent production fixes and current gate results are
+recorded in [Windows release gates](windows-release-gates.md).
+
 Base: d2bba7ba74ea380d0565175aee97809f639f4774. Version 0.1.0. Tested on this Windows machine, not a clean Windows 10/11 VM. No Phase 4 features, dependency changes or automatic commit/push.
 
 ## Baseline and installation

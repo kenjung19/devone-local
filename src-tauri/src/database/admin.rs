@@ -411,6 +411,21 @@ pub fn backup(app: &mut Application, id: &str, name: &str) -> Result<Backup> {
     )?;
     Ok(backup)
 }
+pub fn validate_restore_source(path: &Path) -> Result<()> {
+    if !path.is_absolute()
+        || !path.is_file()
+        || crate::platform::is_link(path)?
+        || path
+            .extension()
+            .and_then(|v| v.to_str())
+            .is_none_or(|v| !v.eq_ignore_ascii_case("sql"))
+        || std::fs::metadata(path)?.len() > 512 * 1024 * 1024
+    {
+        return fail("Select a regular trusted .sql file, maximum 512 MiB");
+    }
+    Ok(())
+}
+
 pub fn restore(
     app: &mut Application,
     id: &str,
@@ -424,13 +439,7 @@ pub fn restore(
         );
     }
     let b = binding(&app.store, id, name)?;
-    if !path.is_file()
-        || crate::platform::is_link(path)?
-        || path.extension().is_none_or(|v| v != "sql")
-        || std::fs::metadata(path)?.len() > 512 * 1024 * 1024
-    {
-        return fail("Select a regular trusted .sql file, maximum 512 MiB");
-    }
+    validate_restore_source(path)?;
     if let Some(s) = &b.site_id
         && app.site(s)?.status == "running"
     {

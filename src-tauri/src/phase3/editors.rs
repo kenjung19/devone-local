@@ -133,21 +133,26 @@ impl EditorProvider for WindowsEditors {
         result
     }
     fn open_project(&self, e: &Editor, path: &Path) -> Result<()> {
-        validate(e)?;
-        if !path.is_dir() {
-            return fail("Project directory does not exist");
-        }
-        let mut cmd = Command::new(&e.executable);
-        crate::platform::configure(&mut cmd);
-        let args = e
-            .args
-            .iter()
-            .map(|a| a.replace("{project}", &path.to_string_lossy()))
-            .collect::<Vec<_>>();
-        cmd.args(args).current_dir(path).spawn()?;
+        project_command(e, path)?.spawn()?;
         Ok(())
     }
 }
+fn project_command(e: &Editor, path: &Path) -> Result<Command> {
+    validate(e)?;
+    if !path.is_dir() {
+        return fail("Project directory does not exist");
+    }
+    let mut cmd = Command::new(&e.executable);
+    crate::platform::configure(&mut cmd);
+    let args = e
+        .args
+        .iter()
+        .map(|a| a.replace("{project}", &path.to_string_lossy()))
+        .collect::<Vec<_>>();
+    cmd.args(args).current_dir(path);
+    Ok(cmd)
+}
+
 pub fn validate(e: &Editor) -> Result<()> {
     if !crate::catalog::safe_segment(&e.id)
         || e.id.is_empty()
@@ -230,5 +235,34 @@ pub fn open(store: &Store, id: Option<&str>, path: &Path) -> Result<()> {
         Ok(())
     } else {
         WindowsEditors.open_project(&e, path)
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+    #[test]
+    fn editor_launch_keeps_project_as_one_argument_without_shell_or_database_credentials() {
+        let d = tempfile::tempdir().unwrap();
+        let executable = d.path().join("editor.exe");
+        std::fs::write(&executable, b"editor validation fixture").unwrap();
+        let project = d.path().join("project & user");
+        std::fs::create_dir(&project).unwrap();
+        let editor = Editor {
+            id: "custom-acceptance".into(),
+            name: "Acceptance".into(),
+            category: "editor".into(),
+            executable: executable.to_string_lossy().into(),
+            args: vec!["--new-window".into(), "{project}".into()],
+        };
+        let command = project_command(&editor, &project).unwrap();
+        assert_eq!(command.get_program(), executable.as_os_str());
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new("--new-window"), project.as_os_str()]
+        );
+        assert_eq!(command.get_current_dir(), Some(project.as_path()));
+        assert!(command.get_envs().next().is_none()); // no injected runtime/DB secret environment
+        assert!(project_command(&editor, &d.path().join("missing")).is_err());
     }
 }

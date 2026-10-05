@@ -133,8 +133,12 @@ fn menu(app: &tauri::AppHandle, state: &TrayView) -> tauri::Result<Menu<tauri::W
 pub fn restore(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
+        let shown = window.show();
+        let focused = window.set_focus();
+        #[cfg(feature = "release-acceptance")]
+        crate::release_acceptance::record_activation(shown.is_ok(), focused.is_ok());
+        #[cfg(not(feature = "release-acceptance"))]
+        let _ = (shown, focused);
     }
 }
 pub fn refresh(app: &tauri::AppHandle, state: &TrayView) -> tauri::Result<()> {
@@ -176,79 +180,89 @@ pub fn install(
             }
         })
         .on_menu_event(move |app, event| {
-            let id = event.id.as_ref();
-            if id == "open" {
-                restore(app);
-                return;
-            }
-            if id == "new-project" {
-                restore(app);
-                let _ = app.emit("devone-new-project", ());
-                return;
-            }
-            if id == "quit" && quitting.swap(true, Ordering::AcqRel) {
-                return;
-            }
-            let action = id.to_string();
-            let app = app.clone();
-            let shared = shared.clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                let result = (|| -> crate::core::Result<()> {
-                    let mut core = shared
-                        .lock()
-                        .map_err(|_| crate::core::Error::Message("Core lock poisoned".into()))?;
-                    match action.as_str() {
-                        "start" => core.start_all(),
-                        "stop" => core.stop_all(),
-                        "restart" => core.restart(),
-                        "quit" => core.shutdown(),
-                        "www" => crate::platform::open(&core.home.www().to_string_lossy()),
-                        _ if action.starts_with("start-site:") => {
-                            core.site_action(&action[11..], "start")
-                        }
-                        _ if action.starts_with("stop-site:") => {
-                            core.site_action(&action[10..], "stop")
-                        }
-                        _ if action.starts_with("folder:") => {
-                            let site = core.site(&action[7..])?;
-                            crate::platform::open(&site.project_path)
-                        }
-                        _ if action.starts_with("editor:") => {
-                            let site = core.site(&action[7..])?;
-                            crate::phase3::editors::open(
-                                &core.store,
-                                None,
-                                std::path::Path::new(&site.project_path),
-                            )?;
-                            crate::phase3::preferences::update(&core.store, &site.id, "opened")
-                        }
-                        _ if action.starts_with("terminal:") => {
-                            let site = core.site(&action[9..])?;
-                            crate::tools::terminal(&core.store, &core.home, &site)?;
-                            crate::phase3::preferences::update(&core.store, &site.id, "opened")
-                        }
-                        _ if action.starts_with("site:") => {
-                            let site = core.site(&action[5..])?;
-                            crate::platform::open(&format!("https://{}", site.hostname))?;
-                            crate::phase3::preferences::update(&core.store, &site.id, "opened")
-                        }
-                        _ => Ok(()),
-                    }
-                })();
-                if let Err(error) = result {
-                    tracing::error!(error=%error,action=%action,"tray action failed");
-                    if let Ok(mut core) = shared.lock() {
-                        core.issues.push(error.to_string());
-                    }
-                    if action != "quit" {
-                        restore(&app);
-                    }
-                }
-                if action == "quit" {
-                    app.exit(0);
-                }
-            });
+            dispatch_menu(app, &shared, &quitting, event.id.as_ref());
         })
         .build(app)?;
     Ok(())
+}
+
+/// The same desktop command/event boundary is used by tray events and the
+/// explicitly compiled acceptance client. Business actions stay in the core.
+pub fn dispatch_menu(
+    app: &tauri::AppHandle,
+    shared: &Shared,
+    quitting: &Arc<AtomicBool>,
+    id: &str,
+) {
+    if id == "open" {
+        restore(app);
+        return;
+    }
+    if id == "new-project" {
+        restore(app);
+        let _ = app.emit("devone-new-project", ());
+        return;
+    }
+    if id == "quit" && quitting.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let action = id.to_string();
+    let app = app.clone();
+    let shared = shared.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = (|| -> crate::core::Result<()> {
+            let mut core = shared
+                .lock()
+                .map_err(|_| crate::core::Error::Message("Core lock poisoned".into()))?;
+            match action.as_str() {
+                "start" => core.start_all(),
+                "stop" => core.stop_all(),
+                "restart" => core.restart(),
+                "quit" => core.shutdown(),
+                "www" => crate::platform::open(&core.home.www().to_string_lossy()),
+                _ if action.starts_with("start-site:") => core.site_action(&action[11..], "start"),
+                _ if action.starts_with("stop-site:") => core.site_action(&action[10..], "stop"),
+                _ if action.starts_with("folder:") => {
+                    let site = core.site(&action[7..])?;
+                    crate::platform::open(&site.project_path)
+                }
+                _ if action.starts_with("editor:") => {
+                    let site = core.site(&action[7..])?;
+                    crate::phase3::editors::open(
+                        &core.store,
+                        None,
+                        std::path::Path::new(&site.project_path),
+                    )?;
+                    crate::phase3::preferences::update(&core.store, &site.id, "opened")
+                }
+                _ if action.starts_with("terminal:") => {
+                    let site = core.site(&action[9..])?;
+                    crate::tools::terminal(&core.store, &core.home, &site)?;
+                    crate::phase3::preferences::update(&core.store, &site.id, "opened")
+                }
+                _ if action.starts_with("site:") => {
+                    let site = core.site(&action[5..])?;
+                    crate::platform::open(&format!("https://{}", site.hostname))?;
+                    crate::phase3::preferences::update(&core.store, &site.id, "opened")
+                }
+                _ => Ok(()),
+            }
+        })();
+        #[cfg(feature = "release-acceptance")]
+        let shutdown_ok = result.is_ok();
+        if let Err(error) = result {
+            tracing::error!(error=%error,action=%action,"tray action failed");
+            if let Ok(mut core) = shared.lock() {
+                core.issues.push(error.to_string());
+            }
+            if action != "quit" {
+                restore(&app);
+            }
+        }
+        if action == "quit" {
+            #[cfg(feature = "release-acceptance")]
+            crate::release_acceptance::record_shutdown(&shared, shutdown_ok);
+            app.exit(0);
+        }
+    });
 }

@@ -20,12 +20,14 @@ fn run() -> devone::core::Result<()> {
     let mut home = Home::resolve()?;
     let mut startup = false;
     let mut smoke = false;
+    let mut acceptance = false;
     let mut explicit_home = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--startup" => startup = true,
             "--smoke-test" => smoke = true,
+            "--acceptance-test" if cfg!(feature = "release-acceptance") => acceptance = true,
             "--home" => {
                 let value = args
                     .next()
@@ -42,6 +44,10 @@ fn run() -> devone::core::Result<()> {
     }
     if smoke && !explicit_home {
         return devone::core::fail("Smoke mode requires an explicit disposable --home path");
+    }
+    if acceptance {
+        #[cfg(feature = "release-acceptance")]
+        devone::release_acceptance::validate_home(&home, explicit_home)?;
     }
     home.ensure()?;
     let instance = match devone::desktop_instance::DesktopInstance::claim(&home)? {
@@ -89,6 +95,14 @@ fn run() -> devone::core::Result<()> {
                 setup_state.clone(),
                 setup_quitting.clone(),
             )?;
+            #[cfg(feature = "release-acceptance")]
+            if acceptance {
+                devone::release_acceptance::install(
+                    tauri_app.handle(),
+                    setup_state.clone(),
+                    setup_quitting.clone(),
+                )?;
+            }
             let complete = setup_state
                 .lock()
                 .map(|s| {
@@ -156,6 +170,9 @@ fn run() -> devone::core::Result<()> {
             drop(watcher.take());
             if let Ok(mut app) = app.lock() {
                 let _ = app.shutdown();
+            }
+            if let Err(error) = instance.shutdown() {
+                tracing::error!(error=%error,"desktop activation cleanup failed");
             }
         }
     });

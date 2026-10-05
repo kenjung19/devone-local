@@ -150,6 +150,21 @@ pub fn setup_wildcard(remove: bool) -> Result<()> {
         fail("Wildcard DNS setup is currently supported on Windows")
     }
 }
+/// Fixed-scope implementation used by the elevated production helper.
+/// This does not elevate or accept arbitrary registry paths/policy identifiers.
+#[cfg(windows)]
+pub fn configure_wildcard_elevated(remove: bool) -> Result<()> {
+    wildcard::configure(remove)?;
+    crate::process::run_checked(
+        &system_executable("ipconfig.exe")?,
+        &["/flushdns".into()],
+        &std::env::current_dir()?,
+        &BTreeMap::new(),
+        std::time::Duration::from_secs(5),
+    )?;
+    Ok(())
+}
+
 pub fn helper_dispatch() -> Option<Result<()>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.len() != 1 {
@@ -159,7 +174,9 @@ pub fn helper_dispatch() -> Option<Result<()>> {
         "--devone-setup-dns" | "--devone-remove-dns" => {
             #[cfg(windows)]
             {
-                Some(wildcard::configure(args[0] == "--devone-remove-dns"))
+                Some(configure_wildcard_elevated(
+                    args[0] == "--devone-remove-dns",
+                ))
             }
             #[cfg(not(windows))]
             {
@@ -258,5 +275,16 @@ pub fn owns_tcp_listener(pid: u32, port: u16) -> bool {
     {
         let _ = (pid, port);
         false
+    }
+}
+
+pub fn choose_sql_file() -> Result<Option<PathBuf>> {
+    #[cfg(windows)]
+    {
+        native::choose_sql_file()
+    }
+    #[cfg(not(windows))]
+    {
+        fail("SQL file selection currently supports Windows")
     }
 }

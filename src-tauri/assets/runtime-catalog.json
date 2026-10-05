@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "revision": 2026100401,
+  "revision": 2026100501,
   "manifests": [
     {
       "version": "8.3.35",
@@ -74,6 +74,25 @@
         "vendor_md5": "2e833921898a9a030ea6bfe81bd811bc",
         "source": "Oracle MySQL",
         "archive_root": "mysql-8.4.11-winx64"
+      },
+      "platform": "windows-x64",
+      "runtime": "mysql"
+    },
+    {
+      "version": "9.7.1",
+      "download": "https://cdn.mysql.com/Downloads/MySQL-9.7/mysql-9.7.1-winx64.zip",
+      "binaries": {
+        "admin": "bin/mysqladmin.exe",
+        "server": "bin/mysqld.exe",
+        "client": "bin/mysql.exe"
+      },
+      "sha256": "d839045f3cc86a7c5791afc2d8e2a24c0ff6ae4f91a97b2b212c9e032d04d6ea",
+      "metadata": {
+        "channel": "LTS",
+        "vendor_md5": "8778341c62eb2ab1a95b1f22bee70f9e",
+        "source": "Oracle MySQL",
+        "archive_root": "mysql-9.7.1-winx64",
+        "signature_key_fingerprint": "BCA43417C3B485DD128EC6D4B7B3B788A8D3785C"
       },
       "platform": "windows-x64",
       "runtime": "mysql"

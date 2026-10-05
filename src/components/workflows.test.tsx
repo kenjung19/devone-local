@@ -1,3 +1,5 @@
+import { RuntimePanel } from "./RuntimePanel";
+import { ErrorNotice } from "./ErrorNotice";
 import { SitesOverview } from "./SitesOverview";
 import { siteProblems, initialVersions, versionLabel } from "../presentation";
 import { NewProject } from "./NewProject";
@@ -76,6 +78,32 @@ const data: Snapshot = {
     mysql: false,
   },
 };
+const developer: NonNullable<Snapshot["developer"]> = {
+  templates: [
+    {
+      id: "static",
+      name: "Static HTML",
+      category: "Static",
+      strategy: "static",
+      version: "",
+      runtimes: {},
+      tools: [],
+      custom: false,
+    },
+  ],
+  template_error: null,
+  creation_tasks: [],
+  editors: [],
+  default_editor: null,
+  preferences: {},
+  managed_databases: [],
+  backups: [],
+  mail: { installed: false, running: false, smtp_port: null, web_port: null },
+  database_catalog: {},
+  backup_preferences: { automatic: false, keep_last: 7 },
+  diagnostic_report: null,
+};
+
 const act = async () => {};
 describe("desktop setup and configuration presentation", () => {
   it("keeps login and environment preferences separate and does not mark a stopped resolver ready", () => {
@@ -369,31 +397,6 @@ describe("Portable config errors", () => {
 });
 
 describe("Phase 3 workflows", () => {
-  const developer: NonNullable<Snapshot["developer"]> = {
-    templates: [
-      {
-        id: "static",
-        name: "Static HTML",
-        category: "Static",
-        strategy: "static",
-        version: "",
-        runtimes: {},
-        tools: [],
-        custom: false,
-      },
-    ],
-    template_error: null,
-    creation_tasks: [],
-    editors: [],
-    default_editor: null,
-    preferences: {},
-    managed_databases: [],
-    backups: [],
-    mail: { installed: false, running: false, smtp_port: null, web_port: null },
-    database_catalog: {},
-    backup_preferences: { automatic: false, keep_last: 7 },
-    diagnostic_report: null,
-  };
   it("shows Static creation without irrelevant runtime or database fields", () => {
     const html = renderToStaticMarkup(
       <NewProject
@@ -594,4 +597,150 @@ describe("daily Windows workflows", () => {
     expect(html).toContain("Open Mailbox");
     expect(html).not.toContain("Set default");
   });
+});
+
+describe("release acceptance screen structure (SSR, no viewport/layout claim)", () => {
+  const complete = {
+    ...data,
+    developer,
+    setup: {
+      ...data.setup,
+      home_ready: true,
+      caddy: true,
+      php: true,
+      mysql: true,
+      dns_policy: true,
+      dns_server: true,
+      dns_system: true,
+      ca_present: true,
+      ca_trusted: true,
+    },
+  };
+  const setup = (snapshot: Snapshot, step: number, busy = false) =>
+    renderToStaticMarkup(
+      <Setup
+        data={snapshot}
+        initialStep={step}
+        busy={busy}
+        error=""
+        progress={null}
+        act={act}
+        importRuntime={() => {}}
+        close={() => {}}
+      />,
+    );
+  it.each([
+    [0, "Home"],
+    [1, "Web Server"],
+    [2, "PHP"],
+    [3, "MySQL"],
+    [4, "Automatic .test domains"],
+    [5, "Windows trust"],
+    [6, "setup-summary"],
+  ])(
+    "renders setup step %s with its stage and persistent navigation",
+    (step, label) => {
+      const html = setup(complete, step as number);
+      expect(html).toContain(label);
+      expect(html.match(/aria-current="step"/g)).toHaveLength(1);
+      expect(html).toContain('class="setup-controls"');
+      expect(html).not.toContain('role="dialog"');
+    },
+  );
+  it.each([
+    "home_ready",
+    "caddy",
+    "php",
+    "mysql",
+    "dns_policy",
+    "dns_server",
+    "dns_system",
+    "ca_present",
+    "ca_trusted",
+  ] as const)("does not enable completion when backend %s is false", (key) => {
+    const html = setup(
+      { ...complete, setup: { ...complete.setup, [key]: false } },
+      6,
+    );
+    const finish = html.match(
+      /<button[^>]*class="primary"[^>]*>[^<]*เสร็จสิ้นและเปิด environment<\/button>/,
+    )?.[0];
+    expect(finish).toContain('disabled=""');
+    expect(html).toContain("ข้ามส่วนที่ยังไม่พร้อม");
+  });
+  it("enables completion only with all readiness checks and disables it while busy", () => {
+    const button = (html: string) =>
+      html.match(
+        /<button[^>]*class="primary"[^>]*>[^<]*เสร็จสิ้นและเปิด environment<\/button>/,
+      )?.[0];
+    expect(button(setup(complete, 6))).not.toContain('disabled=""');
+    expect(button(setup(complete, 6, true))).toContain('disabled=""');
+  });
+  it("renders Sites empty, Ready, Needs setup and Error states", () => {
+    const overview = (snapshot: Snapshot) =>
+      renderToStaticMarkup(
+        <SitesOverview
+          data={snapshot}
+          busy={false}
+          act={act}
+          view={() => {}}
+          create={() => {}}
+        />,
+      );
+    expect(overview({ ...complete, sites: [] })).toContain("No projects yet.");
+    expect(overview(complete)).toContain("Ready");
+    expect(overview({ ...complete, installed: [] })).toContain("Needs setup");
+    expect(
+      overview({ ...complete, sites: [{ ...site, status: "failed" }] }),
+    ).toContain("Error");
+  });
+  it("renders primary workflow controls for Runtimes, Database, Tools and Settings", () => {
+    const html = renderToStaticMarkup(
+      <>
+        <RuntimePanel
+          data={complete}
+          busy={false}
+          act={act}
+          importRuntime={() => {}}
+          configure={() => {}}
+        />
+        <DatabaseManager
+          data={complete}
+          busy={false}
+          act={act}
+          logs={() => {}}
+        />
+        <ToolManager data={complete} busy={false} act={act} />
+        <ProductSettings data={complete} busy={false} act={act} />
+        <DeveloperSettings data={complete} busy={false} act={act} />
+      </>,
+    );
+    for (const label of [
+      "PHP",
+      "Node",
+      "MySQL",
+      "Web Server",
+      "Configure",
+      "Installed",
+      "Available",
+      "Start DEVONE Local with Windows",
+      "Start environment automatically",
+      "Recreate CA",
+    ])
+      expect(html).toContain(label);
+  });
+  it.each([
+    "DNS UDP 53 conflict",
+    "The exact DEVONE CA is still trusted",
+    "default PHP is missing",
+  ])(
+    "keeps understandable error guidance separate from details: %s",
+    (error) => {
+      const html = renderToStaticMarkup(<ErrorNotice error={error} />);
+      expect(html).toContain('role="alert"');
+      expect(html).toContain("<strong>");
+      expect(html).toContain("<details><summary>Technical details</summary>");
+      expect(html).toContain(`<pre>${error}</pre>`);
+    },
+  );
 });

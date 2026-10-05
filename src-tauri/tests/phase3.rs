@@ -745,10 +745,7 @@ fn native_created_next_and_react_vite_run_through_https() {
             .timeout(Duration::from_secs(20))
             .build()
             .unwrap();
-        let response = client
-            .get(format!("https://{}", site.hostname))
-            .send()
-            .unwrap();
+        let response = https::ready_get(&client, &format!("https://{}", site.hostname)).unwrap();
         assert!(response.status().is_success());
         let text = response.text().unwrap();
         assert!(text.contains(if template == "next" {
@@ -760,3 +757,6 @@ fn native_created_next_and_react_vite_run_through_https() {
     }
     a.stop_all().unwrap();
 }
+
+#[path = "support/https.rs"]
+mod https;
