@@ -24,6 +24,8 @@ pub struct Definition {
     #[serde(default)]
     pub port: bool,
     #[serde(default)]
+    pub health: Option<crate::process::HealthStrategy>,
+    #[serde(default)]
     pub autostart: bool,
 }
 fn root_cwd() -> String {
@@ -43,26 +45,42 @@ impl Definition {
     pub fn script(id: &str, script: &str, port: bool) -> Self {
         Self {
             id: id.into(),
-            name: id.into(),
+            name: match id {
+                "web" => "Web server",
+                "vite" => "Vite",
+                "queue" => "Queue Worker",
+                "scheduler" => "Scheduler",
+                _ => id,
+            }
+            .into(),
             runtime: "node".into(),
             executable: "pnpm".into(),
             args: vec!["run".into(), script.into()],
             cwd: root_cwd(),
             env: BTreeMap::new(),
             port,
+            health: None,
             autostart: true,
         }
     }
     pub fn artisan(id: &str, args: Vec<String>) -> Self {
         Self {
             id: id.into(),
-            name: id.into(),
+            name: match id {
+                "web" => "Web server",
+                "vite" => "Vite",
+                "queue" => "Queue Worker",
+                "scheduler" => "Scheduler",
+                _ => id,
+            }
+            .into(),
             runtime: "php".into(),
             executable: "php".into(),
             args: [vec!["artisan".into()], args].concat(),
             cwd: root_cwd(),
             env: BTreeMap::new(),
             port: false,
+            health: None,
             autostart: true,
         }
     }
@@ -79,6 +97,20 @@ impl Definition {
             ("node", "node" | "pnpm") | ("php", "php" | "composer")
         ) {
             return fail("Choose a managed node, pnpm, php or composer executable");
+        }
+        if !self.port
+            && self
+                .health
+                .is_some_and(|h| !matches!(h, crate::process::HealthStrategy::ProcessAlive))
+        {
+            return fail("TCP/HTTP health requires a managed port");
+        }
+        if self.id == "web"
+            && self
+                .health
+                .is_some_and(|h| !matches!(h, crate::process::HealthStrategy::Http))
+        {
+            return fail("Web process health must use HTTP readiness");
         }
         if self.cwd != "." && !crate::catalog::safe_relative(&self.cwd) {
             return fail("Process cwd must be relative to project");
@@ -99,16 +131,26 @@ impl Definition {
         for (k, v) in &self.env {
             if !k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
                 || k.is_empty()
+                || k.as_bytes().first().is_some_and(|b| b.is_ascii_digit())
                 || v.contains('\0')
                 || v.len() > 4096
                 || [
                     "PATH",
+                    "PORT",
+                    "HOST",
+                    "DEVONE_HOME",
+                    "DEVONE_SITE",
+                    "COREPACK_ENABLE_NETWORK",
+                    "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS",
+                    "npm_config_manage_package_manager_versions",
+                    "pnpm_config_pm_on_fail",
                     "PHPRC",
                     "PHP_INI_SCAN_DIR",
                     "NODE_OPTIONS",
                     "COMSPEC",
                 ]
-                .contains(&k.to_uppercase().as_str())
+                .iter()
+                .any(|reserved| reserved.eq_ignore_ascii_case(k))
                 || ["SECRET", "TOKEN", "PASSWORD", "PRIVATE", "KEY"]
                     .iter()
                     .any(|s| k.to_uppercase().contains(s))
@@ -169,7 +211,14 @@ pub fn list(store: &Store, site: &Site) -> Result<Vec<ProjectProcess>> {
                 site_id: site.id.clone(),
                 enabled: states.get(&d.id).copied().unwrap_or(false),
                 assigned_port,
-                health_strategy: if d.port { "owned_port" } else { "alive" }.into(),
+                health_strategy: serde_json::to_value(d.health.unwrap_or(if d.port {
+                    crate::process::HealthStrategy::Http
+                } else {
+                    crate::process::HealthStrategy::ProcessAlive
+                }))?
+                .as_str()
+                .unwrap_or("process_alive")
+                .into(),
                 status,
                 key,
                 definition: d,
@@ -192,5 +241,16 @@ pub fn enable(store: &Store, site: &Site, id: &str, enabled: bool) -> Result<()>
         .definition;
     d.validate(Path::new(&site.project_path))?;
     store.conn.execute("INSERT INTO project_processes(site_id,id,definition,enabled) VALUES(?1,?2,?3,?4) ON CONFLICT(site_id,id) DO UPDATE SET enabled=excluded.enabled",rusqlite::params![site.id,id,serde_json::to_string(&d)?,enabled])?;
+    Ok(())
+}
+
+pub fn autostart(store: &Store, site: &Site, id: &str, value: bool) -> Result<()> {
+    let p = list(store, site)?
+        .into_iter()
+        .find(|p| p.definition.id == id)
+        .ok_or_else(|| crate::core::Error::Message("Unknown project process".into()))?;
+    let mut d = p.definition;
+    d.autostart = value;
+    store.conn.execute("INSERT INTO project_processes(site_id,id,definition,enabled) VALUES(?1,?2,?3,?4) ON CONFLICT(site_id,id) DO UPDATE SET definition=excluded.definition",rusqlite::params![site.id,id,serde_json::to_string(&d)?,p.enabled])?;
     Ok(())
 }

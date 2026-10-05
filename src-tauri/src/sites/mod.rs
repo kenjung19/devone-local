@@ -13,7 +13,11 @@ pub struct Site {
     pub discovered_at: i64,
     pub updated_at: i64,
     pub overrides: BTreeMap<String, String>,
+    #[serde(default)]
+    pub local_overrides: BTreeMap<String, String>,
     pub resolved: BTreeMap<String, String>,
+    #[serde(default)]
+    pub runtime_sources: BTreeMap<String, String>,
     pub status: String,
     pub https: String,
     #[serde(default)]

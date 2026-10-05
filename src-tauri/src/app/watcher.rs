@@ -51,13 +51,10 @@ pub fn watch(app: Arc<Mutex<Application>>) -> Result<WatchHandle> {
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    if let Ok(mut app) = app.lock() {
-                        let Application {
-                            supervisor, store, ..
-                        } = &mut *app;
-                        if let Err(e) = supervisor.reconcile(store) {
-                            tracing::error!(error=%e,"supervisor reconciliation failed");
-                        }
+                    if let Ok(mut app) = app.lock()
+                        && let Err(e) = app.snapshot()
+                    {
+                        tracing::error!(error=%e,"health/route reconciliation failed");
                     }
                 }
                 Err(_) => break,

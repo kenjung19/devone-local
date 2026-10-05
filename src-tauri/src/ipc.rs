@@ -27,6 +27,8 @@ pub enum Action {
     SaveProcess {
         site_id: String,
         definition: crate::projects::processes::Definition,
+        #[serde(default)]
+        replace: bool,
     },
     SavePortable {
         site_id: String,
@@ -39,6 +41,15 @@ pub enum Action {
     InstallDependencies {
         site_id: String,
         manager: String,
+    },
+    ToolAction {
+        id: String,
+        version: String,
+        operation: String,
+        runtime_version: Option<String>,
+    },
+    CancelDependencies {
+        site_id: String,
     },
     Scan,
     Start,
@@ -135,8 +146,50 @@ fn apply(app: &mut Application, action: Action) -> Result<Response> {
         Action::SaveProcess {
             site_id,
             definition,
+            replace,
         } => {
             let site = app.site(&site_id)?;
+            let existing = site
+                .processes
+                .iter()
+                .any(|p| p.definition.id == definition.id);
+            if existing && !replace {
+                return crate::core::fail(
+                    "Process ID already exists. Use Edit to replace its local definition",
+                );
+            }
+            if ["web", "vite", "queue", "scheduler", "dependencies"]
+                .contains(&definition.id.as_str())
+                && !existing
+                && !(definition.id == "web"
+                    && definition.port
+                    && site.metadata.route == crate::projects::metadata::RouteStrategy::NodeProxy)
+            {
+                return crate::core::fail("Process ID is reserved for detected processes");
+            }
+            if site.metadata.error.is_some() {
+                return crate::core::fail(site.metadata.error.as_deref().unwrap());
+            }
+            let mut validated_site = site.clone();
+            if !validated_site.resolved.contains_key(&definition.runtime) {
+                let kind = if definition.runtime == "php" {
+                    RuntimeType::Php
+                } else {
+                    RuntimeType::Node
+                };
+                if let Some(r) = runtime::default_ref(&app.store, &kind)? {
+                    validated_site
+                        .resolved
+                        .insert(definition.runtime.clone(), r.version);
+                }
+            }
+            let checked =
+                crate::tools::command(&app.store, &app.home, &validated_site, &definition, None)?;
+            if !checked.binary.is_file() {
+                return crate::core::fail(
+                    "Selected managed runtime executable is missing; validate or reinstall it before saving",
+                );
+            }
             app.supervisor
                 .stop(&app.store, &format!("site:{site_id}:{}", definition.id))?;
             crate::projects::processes::save(&app.store, &site, &definition)?;
@@ -204,6 +257,33 @@ fn apply(app: &mut Application, action: Action) -> Result<Response> {
                 crate::database::provision::secret(&app.home, &binding.credential_ref)?.to_string(),
             );
         }
+        Action::ToolAction {
+            id,
+            version,
+            operation,
+            runtime_version,
+        } => match operation.as_str() {
+            "default" => crate::tools::set_default(&app.store, &app.home, &id, &version)?,
+            "remove" => {
+                if crate::tools::tasks::list()
+                    .iter()
+                    .any(|t| t.manager == id && t.status == "running")
+                {
+                    return crate::core::fail("A dependency task is using this tool");
+                }
+                crate::tools::remove(&app.store, &app.home, &app.sites()?, &id, &version)?;
+            }
+            "validate" => {
+                let r = runtime_version.ok_or_else(|| {
+                    Error::Message("Choose managed runtime for validation".into())
+                })?;
+                message = Some(crate::tools::validate(
+                    &app.store, &app.home, &id, &version, &r,
+                )?);
+            }
+            _ => return crate::core::fail("Unknown tool action"),
+        },
+        Action::CancelDependencies { site_id } => crate::tools::tasks::cancel(&site_id)?,
         Action::Scan => app.scan()?,
         Action::Start => app.start_all()?,
         Action::Stop => app.stop_all()?,
@@ -418,4 +498,70 @@ pub async fn inspect_import(
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())
+}
+#[cfg(test)]
+mod process_editor_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    #[test]
+    fn editor_validates_available_runtime_unique_reserved_id_and_cwd_before_save() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = Application::open_with_options(
+            crate::config::Home::new(root.path()),
+            crate::app::Options {
+                system_setup: false,
+                autostart: false,
+            },
+        )
+        .unwrap();
+        let project = app.home.www().join("editor");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("package.json"), "{}").unwrap();
+        let manifest = RuntimeManifest {
+            runtime: RuntimeType::Node,
+            version: "24.21.0".into(),
+            platform: crate::platform::platform_key(),
+            binaries: BTreeMap::from([("cli".into(), "node.exe".into())]),
+            download: None,
+            sha256: None,
+            metadata: BTreeMap::new(),
+        };
+        app.store.conn.execute("INSERT INTO runtime_installations(id,kind,version,manifest,relative_path,installed_at) VALUES('node:24.21.0','node','24.21.0',?1,'runtimes/node/24.21.0',0)",[serde_json::to_string(&manifest).unwrap()]).unwrap();
+        app.store.set_setting("default.node", "24.21.0").unwrap();
+        app.scan().unwrap();
+        let site = app.sites().unwrap().remove(0);
+        let mut definition = crate::projects::processes::Definition::script("worker", "dev", false);
+        definition.executable = "node".into();
+        definition.args = vec!["worker.js".into()];
+        let save = |d, replace| Action::SaveProcess {
+            site_id: site.id.clone(),
+            definition: d,
+            replace,
+        };
+        assert!(apply(&mut app, save(definition.clone(), false)).is_err());
+        let binary = app.home.runtime("node", "24.21.0").join("node.exe");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(binary, "offline validation fixture; never executed").unwrap();
+        apply(&mut app, save(definition.clone(), false)).unwrap();
+        assert!(!app.site(&site.id).unwrap().processes[0].enabled);
+        assert!(apply(&mut app, save(definition.clone(), false)).is_err());
+        definition.cwd = "../outside".into();
+        assert!(apply(&mut app, save(definition.clone(), true)).is_err());
+        definition.cwd = ".".into();
+        definition.env.insert("PORT".into(), "9000".into());
+        assert!(apply(&mut app, save(definition.clone(), true)).is_err());
+        definition.env.clear();
+        definition.id = "queue".into();
+        assert!(apply(&mut app, save(definition.clone(), false)).is_err());
+        definition.id = "web".into();
+        definition.port = true;
+        apply(&mut app, save(definition, false)).unwrap();
+        assert!(
+            app.site(&site.id)
+                .unwrap()
+                .processes
+                .iter()
+                .any(|p| p.definition.id == "web" && !p.enabled)
+        );
+    }
 }

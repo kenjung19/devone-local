@@ -23,6 +23,32 @@ const artifacts = readdirSync(directory).filter(
 );
 if (!artifacts.length)
   throw new Error(`No ${version} x64 NSIS installer found in ${directory}`);
+const installerScript = readFileSync(
+  join(root, "src-tauri/target", target, "release/nsis/x64/installer.nsi"),
+  "utf8",
+);
+const payloadStatements = installerScript
+  .split(/\r?\n/)
+  .filter((line) => /^\s*File\s/i.test(line));
+const allowedPayload =
+  /\$\{MAINBINARYSRCPATH\}|\$\{WEBVIEW2(?:BOOTSTRAPPER|INSTALLER)PATH\}|release[\\/]devone-core\.exe/i;
+for (const line of payloadStatements) {
+  if (
+    !allowedPayload.test(line) ||
+    /fixtures|node_modules|DEVONE_HOME|[\\/]debug[\\/]|devone-process-fixture/i.test(
+      line,
+    )
+  ) {
+    throw new Error(`Unexpected installer payload: ${line.trim()}`);
+  }
+}
+if (!payloadStatements.some((line) => line.includes("${MAINBINARYSRCPATH}")))
+  throw new Error("Product executable missing from installer payload");
+const packagingAudit = {
+  payloadStatements: payloadStatements.map((line) => line.trim()),
+  fixtureFeature: false,
+  projectDependenciesBundled: false,
+};
 const report = artifacts.map((filename) => {
   const bytes = readFileSync(join(directory, filename));
   return {
@@ -30,6 +56,7 @@ const report = artifacts.map((filename) => {
     version,
     target,
     installer: "NSIS current-user",
+    packagingAudit,
     bytes: bytes.length,
     sha256: createHash("sha256").update(bytes).digest("hex"),
   };

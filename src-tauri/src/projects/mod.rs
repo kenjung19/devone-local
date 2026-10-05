@@ -1,5 +1,6 @@
 pub mod metadata;
 pub mod processes;
+pub mod vite;
 use crate::{
     core::{Result, fail, timestamp},
     storage::Store,

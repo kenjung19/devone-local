@@ -18,10 +18,14 @@ pub struct Metadata {
     pub package_manager: Option<String>,
     pub package_manager_version: Option<String>,
     pub dev_script: Option<String>,
+    pub scripts: Vec<String>,
     pub build_script: Option<String>,
     pub route: RouteStrategy,
     pub processes: Vec<super::processes::Definition>,
     pub node_dependencies: bool,
+    pub node_dependency_state: String,
+    pub composer_dependency_state: String,
+    pub composer_manifest: bool,
     pub composer_dependencies: bool,
     pub error: Option<String>,
 }
@@ -40,6 +44,9 @@ pub fn package(p: &Path) -> Option<serde_json::Value> {
 fn read_json(p: &Path) -> Result<serde_json::Value> {
     if crate::platform::is_link(p)? {
         return fail("Project metadata files must not be links/junctions");
+    }
+    if std::fs::metadata(p)?.len() > 1024 * 1024 {
+        return fail("Project metadata exceeds 1 MiB");
     }
     let bytes = std::fs::read(p)?;
     if bytes.len() > 1024 * 1024 {
@@ -79,6 +86,8 @@ pub fn inspect(p: &Path, kind: &str) -> Result<Metadata> {
             ("npm", "package-lock.json"),
             ("npm", "npm-shrinkwrap.json"),
             ("yarn", "yarn.lock"),
+            ("bun", "bun.lock"),
+            ("bun", "bun.lockb"),
         ]
         .into_iter()
         .filter(|(_, f)| p.join(f).is_file())
@@ -103,16 +112,37 @@ pub fn inspect(p: &Path, kind: &str) -> Result<Metadata> {
                     .into(),
             );
         }
+        m.scripts = ["dev", "start"]
+            .into_iter()
+            .filter(|s| j["scripts"][s].is_string())
+            .map(str::to_owned)
+            .collect();
         m.dev_script = ["dev", "start"]
             .into_iter()
             .find(|s| j["scripts"][s].is_string())
             .map(str::to_string);
         m.build_script = j["scripts"]["build"].is_string().then(|| "build".into());
         m.node_dependencies = p.join("node_modules").is_dir();
-        if kind == "laravel" && m.dev_script.is_some() {
+        m.node_dependency_state = dependency_state(
+            p,
+            "package.json",
+            &[
+                "pnpm-lock.yaml",
+                "package-lock.json",
+                "yarn.lock",
+                "bun.lock",
+                "bun.lockb",
+            ],
+            "node_modules",
+        );
+        let laravel_vite = kind == "laravel"
+            && ["dependencies", "devDependencies"]
+                .iter()
+                .any(|key| j[*key].get("vite").is_some());
+        if laravel_vite && m.dev_script.is_some() {
             m.requirements.push("node".into());
         }
-        if m.dev_script.is_some() && matches!(kind, "node" | "next" | "vite" | "laravel") {
+        if m.dev_script.is_some() && (matches!(kind, "node" | "next" | "vite") || laravel_vite) {
             m.processes.push(super::processes::Definition::script(
                 if kind == "laravel" { "vite" } else { "web" },
                 m.dev_script.as_deref().unwrap(),
@@ -121,7 +151,14 @@ pub fn inspect(p: &Path, kind: &str) -> Result<Metadata> {
         }
     }
     if p.join("composer.json").is_file() {
+        m.composer_manifest = true;
         m.composer_dependencies = p.join("vendor/autoload.php").is_file();
+        m.composer_dependency_state = dependency_state(
+            p,
+            "composer.json",
+            &["composer.lock"],
+            "vendor/autoload.php",
+        );
     }
     if kind == "laravel" {
         m.processes.push(super::processes::Definition::artisan(
@@ -134,8 +171,12 @@ pub fn inspect(p: &Path, kind: &str) -> Result<Metadata> {
         ));
     }
     if p.join(".devone.json").is_file() {
-        let portable: Portable = serde_json::from_value(read_json(&p.join(".devone.json"))?)?;
-        validate(&portable, p)?;
+        let portable: Portable = (|| -> Result<Portable> {
+            let config = serde_json::from_value(read_json(&p.join(".devone.json"))?)?;
+            validate(&config, p)?;
+            Ok(config)
+        })()
+        .map_err(|e| crate::core::Error::Message(format!(".devone.json contains an error: {e}")))?;
         m.runtimes = portable.runtimes;
         for d in portable.processes {
             m.processes.retain(|v| v.id != d.id);
@@ -170,4 +211,30 @@ pub fn validate(p: &Portable, root: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn dependency_state(root: &Path, manifest: &str, locks: &[&str], installed: &str) -> String {
+    let target = root.join(installed);
+    if !target.exists() {
+        return "missing".into();
+    }
+    let stamp = target.metadata().and_then(|m| m.modified()).ok();
+    if stamp.is_none() {
+        return "unknown".into();
+    }
+    if std::iter::once(manifest)
+        .chain(locks.iter().copied())
+        .any(|f| {
+            root.join(f)
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .is_some_and(|t| Some(t) > stamp)
+        })
+    {
+        "possibly_stale"
+    } else {
+        "installed"
+    }
+    .into()
 }

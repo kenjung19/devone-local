@@ -1,3 +1,4 @@
+pub mod tasks;
 use crate::{
     config::Home,
     core::{Result, RuntimeRef, RuntimeType},
@@ -32,8 +33,22 @@ pub fn environment(store: &Store, home: &Home, site: &Site) -> Result<BTreeMap<S
             }
         }
     }
-    for tool in installed(store)? {
-        paths.push(home.path(&format!("tools/{}/{}", tool.id, tool.version)));
+    for id in ["pnpm", "composer"] {
+        let selected = selected_version(
+            store,
+            id,
+            if id == "pnpm" {
+                site.metadata.package_manager_version.as_deref()
+            } else {
+                None
+            },
+        )?;
+        if let Some(tool) = installed(store)?
+            .into_iter()
+            .find(|t| t.id == id && Some(&t.version) == selected.as_ref())
+        {
+            paths.push(home.path(&format!("tools/{}/{}", tool.id, tool.version)));
+        }
     }
     paths.push(std::path::Path::new(&site.project_path).join("node_modules/.bin"));
     #[cfg(windows)]
@@ -54,6 +69,11 @@ pub fn environment(store: &Store, home: &Home, site: &Site) -> Result<BTreeMap<S
         ("DEVONE_HOME".into(), home.root().to_string_lossy().into()),
         ("DEVONE_SITE".into(), site.hostname.clone()),
         ("COREPACK_ENABLE_NETWORK".into(), "0".into()),
+        ("pnpm_config_pm_on_fail".into(), "ignore".into()),
+        (
+            "npm_config_manage_package_manager_versions".into(),
+            "false".into(),
+        ),
     ]);
     if let Some(version) = site.resolved.get("php")
         && let Ok(runtime) = runtime::find(
@@ -119,9 +139,10 @@ pub fn find(
     id: &str,
     version: Option<&str>,
 ) -> Result<std::path::PathBuf> {
+    let selected = selected_version(store, id, version)?;
     let t = installed(store)?
         .into_iter()
-        .find(|t| t.id == id && version.is_none_or(|v| v == t.version))
+        .find(|t| t.id == id && Some(&t.version) == selected.as_ref())
         .ok_or_else(|| {
             crate::core::Error::Message(format!(
                 "Install managed {id} {} first",
@@ -197,57 +218,67 @@ pub fn install(
                     "This Node import has no bundled npm CLI. Import the official Node distribution to bootstrap managed pnpm",
                 );
             }
-            let native_url = t.native_url.as_deref().ok_or_else(|| {
-                crate::core::Error::Message("Missing pinned native pnpm metadata".into())
-            })?;
-            let response = client
-                .get(native_url)
-                .send()
-                .and_then(|r| r.error_for_status())
-                .map_err(|e| crate::core::Error::Message(e.to_string()))?;
-            let mut native = Vec::new();
-            response
-                .take(128 * 1024 * 1024 + 1)
-                .read_to_end(&mut native)?;
-            if native.len() > 128 * 1024 * 1024
-                || Some(crate::catalog::digest(&native).as_str()) != t.native_sha256.as_deref()
-            {
-                return crate::core::fail("Native pnpm checksum mismatch");
+            let mut archives = Vec::new();
+            if let Some(native_url) = t.native_url.as_deref() {
+                let response = client
+                    .get(native_url)
+                    .send()
+                    .and_then(|r| r.error_for_status())
+                    .map_err(|e| crate::core::Error::Message(e.to_string()))?;
+                let mut native = Vec::new();
+                response
+                    .take(128 * 1024 * 1024 + 1)
+                    .read_to_end(&mut native)?;
+                if native.len() > 128 * 1024 * 1024
+                    || Some(crate::catalog::digest(&native).as_str()) != t.native_sha256.as_deref()
+                {
+                    return crate::core::fail("Native pnpm checksum mismatch");
+                }
+                let archive = staging.join("pnpm-native.tgz");
+                std::fs::write(&archive, native)?;
+                archives.push(archive);
             }
-            let native_archive = staging.join("pnpm-native.tgz");
-            std::fs::write(&native_archive, native)?;
             let archive = staging.join("pnpm.tgz");
             std::fs::write(&archive, data)?;
+            let mut args = vec![
+                npm.to_string_lossy().into(),
+                "install".into(),
+                archive.to_string_lossy().into(),
+            ];
+            args.extend(archives.iter().map(|p| p.to_string_lossy().into_owned()));
+            args.extend([
+                "--omit=optional".into(),
+                "--prefix".into(),
+                staging.to_string_lossy().into(),
+                "--ignore-scripts".into(),
+                "--no-audit".into(),
+                "--no-fund".into(),
+                "--offline".into(),
+            ]);
             crate::process::run_logged(
                 &runtime.binary(home, "cli")?,
-                &[
-                    npm.to_string_lossy().into(),
-                    "install".into(),
-                    archive.to_string_lossy().into(),
-                    native_archive.to_string_lossy().into(),
-                    "--omit=optional".into(),
-                    "--prefix".into(),
-                    staging.to_string_lossy().into(),
-                    "--ignore-scripts".into(),
-                    "--no-audit".into(),
-                    "--no-fund".into(),
-                    "--offline".into(),
-                ],
+                &args,
                 &staging,
                 &BTreeMap::new(),
                 Duration::from_secs(120),
                 &home.path("logs/tool-pnpm-install.log"),
             )?;
             std::fs::remove_file(archive)?;
-            std::fs::remove_file(native_archive)?;
+            for archive in archives {
+                std::fs::remove_file(archive)?;
+            }
             let cli = staging.join(&t.entry);
-            let env = BTreeMap::from([("COREPACK_ENABLE_NETWORK".into(), "0".into())]);
+            let env = validation_environment();
             let actual = crate::process::run_checked(
                 &runtime.binary(home, "cli")?,
-                &[cli.to_string_lossy().into(), "--version".into()],
+                &[
+                    cli.to_string_lossy().into(),
+                    pnpm_policy(&t.version).into(),
+                    "--version".into(),
+                ],
                 &staging,
                 &env,
-                Duration::from_secs(10),
+                Duration::from_secs(60),
             )?;
             if actual.trim() != t.version {
                 return crate::core::fail("Managed pnpm version mismatch");
@@ -258,16 +289,54 @@ pub fn install(
         if !staging.join(&t.entry).is_file() {
             return crate::core::fail("Tool archive does not contain CLI entry");
         }
-        if id == "pnpm" {
-            std::fs::write(
-                staging.join("pnpm.cmd"),
-                "@echo off\r\nnode \"%~dp0node_modules\\pnpm\\bin\\pnpm.mjs\" %*\r\n",
-            )?;
-        } else {
+        if id == "composer" {
             std::fs::write(
                 staging.join("composer.cmd"),
                 "@echo off\r\nphp \"%~dp0composer.phar\" %*\r\n",
             )?;
+        }
+        if id == "pnpm" {
+            std::fs::write(
+                staging.join("pnpm.cmd"),
+                format!(
+                    "@echo off\r\nnode \"%~dp0{}\" {} %*\r\n",
+                    t.entry.replace('/', "\\"),
+                    pnpm_policy(&t.version)
+                ),
+            )?;
+        } else {
+            let php = node
+                .map(str::to_owned)
+                .or(store.setting("default.php")?)
+                .ok_or_else(|| {
+                    crate::core::Error::Message("Select site PHP to validate Composer".into())
+                })?;
+            let runtime = runtime::find(
+                store,
+                &RuntimeRef {
+                    kind: RuntimeType::Php,
+                    version: php.clone(),
+                },
+            )?;
+            let actual = crate::process::run_checked(
+                &runtime.binary(home, "cli")?,
+                &[
+                    staging.join(&t.entry).to_string_lossy().into(),
+                    "--version".into(),
+                ],
+                &staging,
+                &BTreeMap::new(),
+                Duration::from_secs(15),
+            )
+            .map_err(|e| {
+                crate::core::Error::Message(format!(
+                    "Composer {} cannot run with PHP {php}: {e}",
+                    t.version
+                ))
+            })?;
+            if !actual.contains(&format!("Composer version {}", t.version)) {
+                return crate::core::fail("Composer version mismatch");
+            }
         }
         std::fs::create_dir_all(target.parent().expect("tool parent"))?;
         std::fs::rename(&staging, &target)?;
@@ -275,6 +344,9 @@ pub fn install(
             "INSERT INTO tools(id,manifest) VALUES(?1,?2)",
             rusqlite::params![format!("{id}:{version}"), serde_json::to_string(&t)?],
         )?;
+        if store.setting(&format!("tool.default.{id}"))?.is_none() {
+            store.set_setting(&format!("tool.default.{id}"), version)?;
+        }
         Ok(())
     })();
     if staging.exists() {
@@ -337,10 +409,32 @@ pub fn command(
             "pnpm",
             site.metadata.package_manager_version.as_deref(),
         )?;
+        let selected = selected_version(
+            store,
+            "pnpm",
+            site.metadata.package_manager_version.as_deref(),
+        )?
+        .ok_or_else(|| crate::core::Error::Message("Select managed pnpm".into()))?;
+        // Do not discover a workspace outside this site's project boundary.
+        if !std::path::Path::new(&site.project_path)
+            .join("pnpm-workspace.yaml")
+            .is_file()
+        {
+            args.insert(0, "--ignore-workspace".into());
+        }
+        args.insert(0, pnpm_policy(&selected).into());
         args.insert(0, cli.to_string_lossy().into());
         // Use adapter metadata to select framework flags, never parse or interpolate shell scripts.
         if let Some(port) = port {
-            if matches!(site.metadata.framework.as_str(), "vite" | "laravel") {
+            if (site.metadata.framework == "vite" && d.id == "web")
+                || (site.metadata.framework == "laravel" && d.id == "vite")
+            {
+                args.extend([
+                    "--config".into(),
+                    crate::projects::vite::config(home, site, port)?
+                        .to_string_lossy()
+                        .into(),
+                ]);
                 args.extend([
                     "--host".into(),
                     "127.0.0.1".into(),
@@ -348,7 +442,7 @@ pub fn command(
                     port.to_string(),
                     "--strictPort".into(),
                 ]);
-            } else if site.metadata.framework == "next" {
+            } else if site.metadata.framework == "next" && d.id == "web" {
                 args.extend([
                     "--hostname".into(),
                     "127.0.0.1".into(),
@@ -364,6 +458,25 @@ pub fn command(
                 .to_string_lossy()
                 .into(),
         );
+    }
+    if d.executable == "composer" {
+        let selected = selected_version(store, "composer", None)?.unwrap_or_default();
+        let actual = crate::process::run_checked(
+            &runtime.binary(home, "cli")?,
+            &[args[0].clone(), "--version".into()],
+            &cwd,
+            &BTreeMap::new(),
+            std::time::Duration::from_secs(60),
+        )
+        .map_err(|e| {
+            crate::core::Error::Message(format!(
+                "Composer {selected} cannot run with PHP {}: {e}",
+                runtime.manifest.version
+            ))
+        })?;
+        if !actual.contains(&format!("Composer version {selected}")) {
+            return crate::core::fail("Composer version validation failed");
+        }
     }
     let mut env = environment(store, home, site)?;
     env.extend(d.env.clone());
@@ -391,6 +504,141 @@ pub fn command(
         log: home
             .path("logs")
             .join(format!("site-{}-{}.log", site.id, d.id)),
+        health: d.health.unwrap_or(if port.is_some() {
+            crate::process::HealthStrategy::Http
+        } else {
+            crate::process::HealthStrategy::ProcessAlive
+        }),
         graceful: None,
     })
+}
+
+/// Explicit project version always wins; a missing declaration never falls back.
+pub fn selected_version(store: &Store, id: &str, declared: Option<&str>) -> Result<Option<String>> {
+    if let Some(v) = declared {
+        return Ok(Some(v.into()));
+    }
+    if let Some(v) = store.setting(&format!("tool.default.{id}"))? {
+        return Ok(Some(v));
+    }
+    Ok(None)
+}
+pub fn set_default(store: &Store, home: &Home, id: &str, version: &str) -> Result<()> {
+    find(store, home, id, Some(version))?;
+    store.set_setting(&format!("tool.default.{id}"), version)
+}
+pub fn validate(
+    store: &Store,
+    home: &Home,
+    id: &str,
+    version: &str,
+    runtime_version: &str,
+) -> Result<String> {
+    let tool = find(store, home, id, Some(version))?;
+    let runtime = runtime::find(
+        store,
+        &RuntimeRef {
+            kind: if id == "pnpm" {
+                RuntimeType::Node
+            } else {
+                RuntimeType::Php
+            },
+            version: runtime_version.into(),
+        },
+    )?;
+    let output = crate::process::run_checked(
+        &runtime.binary(home, "cli")?,
+        &if id == "pnpm" {
+            vec![
+                tool.to_string_lossy().into(),
+                pnpm_policy(version).into(),
+                "--version".into(),
+            ]
+        } else {
+            vec![tool.to_string_lossy().into(), "--version".into()]
+        },
+        &runtime.root(home),
+        &validation_environment(),
+        std::time::Duration::from_secs(60),
+    )?;
+    if (id == "pnpm" && output.trim() != version)
+        || (id == "composer" && !output.contains(&format!("Composer version {version}")))
+    {
+        return crate::core::fail("Managed tool version mismatch");
+    }
+    Ok(output)
+}
+pub fn remove(store: &Store, home: &Home, sites: &[Site], id: &str, version: &str) -> Result<()> {
+    if sites.iter().any(|s| {
+        s.processes
+            .iter()
+            .any(|p| p.enabled && p.definition.executable == id)
+            && selected_version(
+                store,
+                id,
+                if id == "pnpm" {
+                    s.metadata.package_manager_version.as_deref()
+                } else {
+                    None
+                },
+            )
+            .ok()
+            .flatten()
+            .as_deref()
+                == Some(version)
+    }) {
+        return crate::core::fail(
+            "Tool is required by an enabled project process; disable that process first",
+        );
+    }
+    find(store, home, id, Some(version))?;
+    std::fs::remove_dir_all(home.path(&format!("tools/{id}/{version}")))?;
+    store
+        .conn
+        .execute("DELETE FROM tools WHERE id=?1", [format!("{id}:{version}")])?;
+    if store.setting(&format!("tool.default.{id}"))?.as_deref() == Some(version) {
+        store.conn.execute(
+            "DELETE FROM settings WHERE key=?1",
+            [format!("tool.default.{id}")],
+        )?;
+    }
+    Ok(())
+}
+
+fn validation_environment() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("COREPACK_ENABLE_NETWORK".into(), "0".into()),
+        ("pnpm_config_pm_on_fail".into(), "ignore".into()),
+        (
+            "npm_config_manage_package_manager_versions".into(),
+            "false".into(),
+        ),
+    ])
+}
+
+fn pnpm_policy(version: &str) -> &'static str {
+    if version
+        .split('.')
+        .next()
+        .and_then(|v| v.parse::<u32>().ok())
+        .is_some_and(|v| v >= 11)
+    {
+        "--pm-on-fail=ignore"
+    } else {
+        "--config.manage-package-manager-versions=false"
+    }
+}
+
+pub fn migrate_defaults(store: &Store) -> Result<()> {
+    if store.setting("tool.defaults.migrated")?.as_deref() == Some("true") {
+        return Ok(());
+    }
+    for id in ["pnpm", "composer"] {
+        if store.setting(&format!("tool.default.{id}"))?.is_none()
+            && let Some(tool) = installed(store)?.into_iter().find(|t| t.id == id)
+        {
+            store.set_setting(&format!("tool.default.{id}"), &tool.version)?;
+        }
+    }
+    store.set_setting("tool.defaults.migrated", "true")
 }

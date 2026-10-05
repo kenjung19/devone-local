@@ -1,3 +1,4 @@
+import { ToolManager } from "./ToolManager";
 import { describe, it, expect } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Setup } from "./Setup";
@@ -271,5 +272,93 @@ describe("Phase 2 site controls", () => {
     expect(html).not.toContain("runtime-php");
     expect(html).not.toContain("runtime-node");
     expect(html).toContain("start site");
+  });
+});
+
+describe("Modern workflow UX", () => {
+  it("shows exact tool versions and default management", () => {
+    const html = renderToStaticMarkup(
+      <ToolManager
+        data={{
+          ...data,
+          tool_defaults: { pnpm: "10.30.1" },
+          tools: [
+            { id: "pnpm", version: "10.30.1", url: "", sha256: "", entry: "" },
+          ],
+          available_tools: [
+            { id: "pnpm", version: "10.30.1", url: "", sha256: "", entry: "" },
+            { id: "pnpm", version: "11.0.0", url: "", sha256: "", entry: "" },
+          ],
+        }}
+        busy={false}
+        act={act}
+      />,
+    );
+    expect(html).toContain("pnpm 10.30.1");
+    expect(html).toContain("pnpm 11.0.0");
+    expect(html).toContain("Set default");
+    expect(html).toContain("Validate");
+    expect(html).toContain("Remove");
+  });
+  it("distinguishes portable runtime source and process groups", () => {
+    const html = renderToStaticMarkup(
+      <SiteDetail
+        site={{
+          ...site,
+          project_type: "node",
+          resolved: { node: "24.21.0" },
+          overrides: { node: "24.21.0" },
+          runtime_sources: { node: ".devone.json" },
+        }}
+        data={data}
+        busy={false}
+        act={act}
+        back={() => {}}
+        logs={() => {}}
+      />,
+    );
+    expect(html).toContain(".devone.json");
+    expect(html).toContain("Frontend");
+    expect(html).toContain("Workers");
+    expect(html).toContain("Custom");
+    expect(html).toContain("Save portable config");
+    expect(html).not.toContain("Project database");
+  });
+});
+
+describe("Portable config errors", () => {
+  it("shows invalid config details even on a static site without tools", () => {
+    const html = renderToStaticMarkup(
+      <SiteDetail
+        site={{
+          ...site,
+          project_type: "static",
+          resolved: {},
+          overrides: {},
+          metadata: {
+            framework: "static",
+            requirements: [],
+            runtimes: {},
+            package_manager: null,
+            package_manager_version: null,
+            dev_script: null,
+            build_script: null,
+            route: "static",
+            node_dependencies: false,
+            composer_dependencies: false,
+            error: ".devone.json contains an error: unknown field",
+          },
+        }}
+        data={data}
+        busy={false}
+        act={act}
+        back={() => {}}
+        logs={() => {}}
+      />,
+    );
+    expect(html).toContain(".devone.json contains an error: unknown field");
+    expect(html).not.toContain("runtime-php");
+    expect(html).not.toContain("runtime-node");
+    expect(html).not.toContain("runtime-mysql");
   });
 });

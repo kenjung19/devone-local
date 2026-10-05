@@ -58,6 +58,7 @@ fn supervisor_records_unexpected_exit_and_captures_logs() {
                 env: BTreeMap::new(),
                 port: None,
                 log: log.clone(),
+                health: devone::process::HealthStrategy::ProcessAlive,
                 graceful: None,
             },
         )
@@ -95,6 +96,7 @@ fn recovery_is_bounded_and_stop_cancels_retries() {
                 env: Default::default(),
                 port: None,
                 log: log.clone(),
+                health: devone::process::HealthStrategy::ProcessAlive,
                 graceful: None,
             },
         )
@@ -163,6 +165,7 @@ fn graceful_stop_requires_owned_listener_and_connected_socket() {
                 env: Default::default(),
                 port: Some(port),
                 log: log.clone(),
+                health: devone::process::HealthStrategy::TcpListener,
                 graceful: Some((fixture(), vec![])),
             },
         )
@@ -190,6 +193,7 @@ fn graceful_stop_requires_owned_listener_and_connected_socket() {
                 env: Default::default(),
                 port: Some(port),
                 log: d.path().join("foreign.log"),
+                health: devone::process::HealthStrategy::TcpListener,
                 graceful: Some((fixture(), vec![])),
             },
         )
@@ -217,4 +221,115 @@ fn graceful_stop_requires_owned_listener_and_connected_socket() {
     }
     assert!(accepted > 0);
     assert!(foreign.local_addr().is_ok());
+}
+
+#[test]
+fn http_health_requires_successful_response_from_owned_listener() {
+    let d = tempfile::tempdir().unwrap();
+    let store = Store::open(&d.path().join("db")).unwrap();
+    let reserve = devone::ports::PortManager::allocate_process(&store, "site:test:web").unwrap();
+    let port = reserve.port;
+    drop(reserve);
+    let mut supervisor = Supervisor::default();
+    supervisor
+        .start(
+            &store,
+            Spec {
+                key: "site:test:web".into(),
+                binary: fixture(),
+                args: vec!["http".into(), port.to_string()],
+                cwd: d.path().into(),
+                env: BTreeMap::new(),
+                port: Some(port),
+                log: d.path().join("http.log"),
+                health: devone::process::HealthStrategy::Http,
+                graceful: None,
+            },
+        )
+        .unwrap();
+    assert!(
+        supervisor
+            .wait_healthy(&store, "site:test:web", Duration::from_millis(400))
+            .is_err()
+    );
+    std::fs::write(d.path().join("ready"), "").unwrap();
+    supervisor
+        .wait_healthy(&store, "site:test:web", Duration::from_secs(5))
+        .unwrap();
+    assert!(supervisor.states(&store).unwrap()[0].healthy);
+    std::fs::remove_file(d.path().join("ready")).unwrap();
+    assert!(!supervisor.states(&store).unwrap()[0].healthy);
+    supervisor.stop_all(&store).unwrap();
+}
+#[test]
+fn dependency_tasks_complete_fail_cancel_and_keep_logs_without_recovery() {
+    let d = tempfile::tempdir().unwrap();
+    for (id, command, expected) in [
+        ("task-success", "echo", "completed"),
+        ("task-fail", "fail", "failed"),
+        ("task-cancel", "sleep", "cancelled"),
+    ] {
+        let log = d.path().join(format!("{id}.log"));
+        let spec = Spec {
+            key: id.into(),
+            binary: fixture(),
+            args: vec![command.into()],
+            cwd: d.path().into(),
+            env: BTreeMap::new(),
+            port: None,
+            log: log.clone(),
+            health: devone::process::HealthStrategy::ProcessAlive,
+            graceful: None,
+        };
+        devone::tools::tasks::start(id, "pnpm", spec.clone()).unwrap();
+        assert!(devone::tools::tasks::start(id, "pnpm", spec).is_err());
+        if command == "sleep" {
+            devone::tools::tasks::cancel(id).unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let tasks = devone::tools::tasks::list();
+            let task = tasks.iter().find(|t| t.site_id == id).unwrap();
+            if task.status != "running" {
+                assert_eq!(task.status, expected);
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(log.is_file());
+        let text = std::fs::read_to_string(log).unwrap();
+        assert!(text.contains("[DEVONE]"));
+        assert!(!text.contains("restart attempt"));
+    }
+}
+
+#[test]
+fn process_alive_health_does_not_admit_an_immediate_worker_failure() {
+    let d = tempfile::tempdir().unwrap();
+    let store = Store::open(&d.path().join("db")).unwrap();
+    let mut supervisor = Supervisor::default();
+    supervisor
+        .start(
+            &store,
+            Spec {
+                key: "site:startup:worker".into(),
+                binary: fixture(),
+                args: vec!["fail".into()],
+                cwd: d.path().into(),
+                env: BTreeMap::new(),
+                port: None,
+                log: d.path().join("worker.log"),
+                health: devone::process::HealthStrategy::ProcessAlive,
+                graceful: None,
+            },
+        )
+        .unwrap();
+    assert!(
+        supervisor
+            .wait_healthy(&store, "site:startup:worker", Duration::from_secs(2))
+            .is_err()
+    );
+    assert!(!supervisor.states(&store).unwrap()[0].healthy);
+    supervisor.stop_all(&store).unwrap();
 }

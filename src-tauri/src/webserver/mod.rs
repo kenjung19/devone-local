@@ -29,10 +29,30 @@ impl WebServer for Caddy {
             crate::platform::validate_local_host(&site.hostname)?;
             let handler = match site.metadata.route {
                 crate::projects::metadata::RouteStrategy::PhpFastcgi => {
-                    format!("php_fastcgi 127.0.0.1:{port}\n file_server")
+                    let frontend = site
+                        .processes
+                        .iter()
+                        .find(|p| p.definition.id == "vite" && p.enabled && p.status == "running")
+                        .and_then(|p| p.assigned_port);
+                    if let Some(vite) = frontend {
+                        format!(
+                            "handle /__devone_vite/* {{\n reverse_proxy 127.0.0.1:{vite}\n }}\n handle {{\n php_fastcgi 127.0.0.1:{port}\n file_server\n }}"
+                        )
+                    } else {
+                        format!("php_fastcgi 127.0.0.1:{port}\n file_server")
+                    }
                 }
                 crate::projects::metadata::RouteStrategy::NodeProxy => {
-                    format!("reverse_proxy 127.0.0.1:{port}")
+                    if site.metadata.framework == "next" {
+                        // Translate only this site's own browser origin on Next development endpoints.
+                        // Foreign origins and application requests retain their original headers.
+                        format!(
+                            "@devone_next_origin {{\n path /_next/* /__nextjs*\n header Origin https://{}\n }}\n handle @devone_next_origin {{\n reverse_proxy 127.0.0.1:{port} {{\n header_up Origin http://127.0.0.1:{port}\n }}\n }}\n handle {{\n reverse_proxy 127.0.0.1:{port}\n }}",
+                            site.hostname
+                        )
+                    } else {
+                        format!("reverse_proxy 127.0.0.1:{port}")
+                    }
                 }
                 crate::projects::metadata::RouteStrategy::Static => "file_server".into(),
             };
@@ -144,6 +164,7 @@ pub fn reconcile(
                 env,
                 port: Some(admin),
                 log: home.path("logs/caddy.log"),
+                health: crate::process::HealthStrategy::TcpListener,
                 graceful: Some((
                     binary,
                     vec![

@@ -15,5 +15,28 @@
     "url": "https://getcomposer.org/download/2.10.3/composer.phar",
     "sha256": "7a2d379d5b8ffdaa028580ef26494c36d2feef4b178d3dd1473a4dbc5e17c8d6",
     "entry": "composer.phar"
+  },
+  {
+    "id": "pnpm",
+    "version": "10.30.1",
+    "url": "https://registry.npmjs.org/pnpm/-/pnpm-10.30.1.tgz",
+    "sha256": "bc8bb877378eab6a8a83114eeb6a31ef88528db4ab5570299baba8fa54da2375",
+    "entry": "node_modules/pnpm/bin/pnpm.cjs",
+    "platform": "windows-x64"
+  },
+  {
+    "id": "pnpm",
+    "version": "11.0.0",
+    "url": "https://registry.npmjs.org/pnpm/-/pnpm-11.0.0.tgz",
+    "sha256": "6456a640ee13980f6e05c21288a2a2f6a7484aeee55365a65d7aa931bbcb6f21",
+    "entry": "node_modules/pnpm/bin/pnpm.mjs",
+    "platform": "windows-x64"
+  },
+  {
+    "id": "composer",
+    "version": "2.2.26",
+    "url": "https://getcomposer.org/download/2.2.26/composer.phar",
+    "sha256": "2f889b1d19666af6081448a526539f73b1d95d10f745536afd8132acb13743f3",
+    "entry": "composer.phar"
   }
 ]

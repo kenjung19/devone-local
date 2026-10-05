@@ -39,6 +39,8 @@ pub struct Snapshot {
     pub environment_autostart: bool,
     pub tools: Vec<crate::tools::Tool>,
     pub available_tools: Vec<crate::tools::Tool>,
+    pub tool_defaults: BTreeMap<String, String>,
+    pub dependency_tasks: Vec<crate::tools::tasks::Task>,
 }
 #[derive(Clone, Copy)]
 pub struct Options {
@@ -55,6 +57,7 @@ pub struct Application {
     _lock: std::fs::File,
     options: Options,
     routed: BTreeMap<String, String>,
+    paused: BTreeSet<String>,
 }
 impl Application {
     pub fn open(home: Home) -> Result<Self> {
@@ -80,6 +83,8 @@ impl Application {
             ))
         })?;
         let store = Store::open(&home.path("devone.db"))?;
+        crate::tools::migrate_defaults(&store)?;
+        crate::tools::tasks::load(&home)?;
         let mut app = Self {
             home,
             store,
@@ -90,6 +95,7 @@ impl Application {
             _lock: lock,
             options,
             routed: BTreeMap::new(),
+            paused: BTreeSet::new(),
         };
         if let Err(e) = catalog::refresh(&app.store, &app.home.path("config/runtime-catalog.json"))
         {
@@ -102,6 +108,9 @@ impl Application {
             }
         }
         app.scan()?;
+        for site in app.sites()?.iter().filter(|s| s.project_type == "laravel") {
+            crate::projects::vite::cleanup(&app.home, site)?;
+        }
         if options.autostart
             && app.store.setting("autostart")?.as_deref() == Some("true")
             && let Err(e) = app.start_all()
@@ -162,7 +171,9 @@ impl Application {
                 discovered_at: r.get(8)?,
                 updated_at: r.get(9)?,
                 overrides: BTreeMap::new(),
+                local_overrides: BTreeMap::new(),
                 resolved: BTreeMap::new(),
+                runtime_sources: BTreeMap::new(),
                 status: "stopped".into(),
                 https: "unavailable".into(),
                 metadata: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or_default(),
@@ -179,7 +190,15 @@ impl Application {
             site.overrides = stmt
                 .query_map([&site.id], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<std::result::Result<BTreeMap<_, _>, _>>()?;
+            site.local_overrides = site.overrides.clone();
+            for k in site.overrides.keys() {
+                site.runtime_sources
+                    .insert(k.clone(), "Local override".into());
+            }
             for (k, v) in &site.metadata.runtimes {
+                site.runtime_sources
+                    .entry(k.clone())
+                    .or_insert(".devone.json".into());
                 site.overrides.entry(k.clone()).or_insert(v.clone());
             }
             site.processes = crate::projects::processes::list(&self.store, site)?;
@@ -200,6 +219,8 @@ impl Application {
                 if kind == RuntimeType::Mysql
                     && let Some(binding) = database_bindings.iter().find(|b| b.site_id == site.id)
                 {
+                    site.runtime_sources
+                        .insert("mysql".into(), "Project database binding".into());
                     site.resolved.insert(
                         "mysql".into(),
                         binding.runtime_id.trim_start_matches("mysql:").to_string(),
@@ -212,6 +233,9 @@ impl Application {
                     &site.overrides,
                     &kind,
                 ) {
+                    site.runtime_sources
+                        .entry(kind.key().into())
+                        .or_insert("Global default".into());
                     site.resolved.insert(kind.key().into(), reference.version);
                 }
             }
@@ -253,6 +277,7 @@ impl Application {
     }
     pub fn snapshot(&mut self) -> Result<Snapshot> {
         let services = self.supervisor.states(&self.store)?;
+        self.refresh_live_routes(&services)?;
         let installed = runtime::installed(&self.store)?;
         let mut sites = self.sites()?;
         let caddy = services
@@ -293,6 +318,16 @@ impl Application {
                 })
             {
                 "running"
+            } else if site.metadata.route == crate::projects::metadata::RouteStrategy::NodeProxy {
+                match services
+                    .iter()
+                    .find(|s| s.key == format!("site:{}:web", site.id))
+                    .map(|s| s.status.as_str())
+                {
+                    Some("starting") => "starting",
+                    Some("failed" | "exited" | "restart limit reached") => "failed",
+                    _ => "stopped",
+                }
             } else {
                 "stopped"
             }
@@ -366,6 +401,16 @@ impl Application {
             environment_autostart: self.store.setting("autostart")?.as_deref() == Some("true"),
             tools: crate::tools::installed(&self.store)?,
             available_tools: crate::tools::available()?,
+            tool_defaults: ["pnpm", "composer"]
+                .into_iter()
+                .filter_map(|id| {
+                    crate::tools::selected_version(&self.store, id, None)
+                        .ok()
+                        .flatten()
+                        .map(|v| (id.into(), v))
+                })
+                .collect(),
+            dependency_tasks: crate::tools::tasks::list_home(&self.home),
         })
     }
     pub fn start_all(&mut self) -> Result<()> {
@@ -422,7 +467,9 @@ impl Application {
                     }
                 }
                 for process in site.processes.iter().filter(|p| p.enabled) {
-                    if process.definition.autostart || self.supervisor.contains(&process.key) {
+                    if !self.paused.contains(&process.key)
+                        && (process.definition.autostart || self.supervisor.contains(&process.key))
+                    {
                         wanted.insert(process.key.clone());
                         if let Err(e) = self.start_project_process(site, process) {
                             errors.push(format!(
@@ -463,7 +510,7 @@ impl Application {
                         )?
                     }
                 };
-                routes.push((site.clone(), port));
+                routes.push((self.site(&site.id)?, port));
                 Ok(())
             })();
             if let Err(e) = result {
@@ -520,7 +567,9 @@ impl Application {
             .get(&p.definition.runtime)
             .cloned()
             .unwrap_or_default();
-        let fingerprint = serde_json::to_string(&(binding, &p.definition))?;
+        let mut command_definition = p.definition.clone();
+        command_definition.autostart = false;
+        let fingerprint = serde_json::to_string(&(binding, command_definition))?;
         let key = format!("process.binding.{}", p.key);
         if self.supervisor.contains(&p.key)
             && self.store.setting(&key)?.as_deref() != Some(&fingerprint)
@@ -554,14 +603,32 @@ impl Application {
             reservation.as_ref().map(|r| r.port),
         )?;
         drop(reservation);
-        self.supervisor.start(&self.store, spec)?;
+        if site.project_type == "laravel" && p.definition.id == "vite" {
+            crate::projects::vite::prepare(&self.home, site)?;
+        }
+        if let Err(e) = self.supervisor.start(&self.store, spec) {
+            if site.project_type == "laravel" && p.definition.id == "vite" {
+                crate::projects::vite::cleanup(&self.home, site)?;
+            }
+            return Err(e);
+        }
         self.store.set_setting(&key, &fingerprint)?;
-        if let Err(error) =
-            self.supervisor
-                .wait_healthy(&self.store, &p.key, Duration::from_secs(20))
+        if let Err(error) = self
+            .supervisor
+            .wait_healthy(&self.store, &p.key, Duration::from_secs(60))
+            .and_then(|()| {
+                if site.project_type == "laravel" && p.definition.id == "vite" {
+                    crate::projects::vite::validate(&self.home, site)
+                } else {
+                    Ok(())
+                }
+            })
         {
             // An unsuccessful first Start must not leave an unauthorized recovery task running.
             self.supervisor.stop(&self.store, &p.key)?;
+            if site.project_type == "laravel" && p.definition.id == "vite" {
+                crate::projects::vite::cleanup(&self.home, site)?;
+            }
             self.store.conn.execute(
                 "UPDATE process_state SET status='failed' WHERE service_key=?1",
                 [&p.key],
@@ -590,6 +657,10 @@ impl Application {
                 if operation == "restart" {
                     self.supervisor.stop(&self.store, &p.key)?;
                 }
+                self.paused.remove(&p.key);
+                if site.metadata.error.is_some() {
+                    return fail(site.metadata.error.as_deref().unwrap());
+                }
                 // The explicit command authorizes this definition only after it validates.
                 self.start_project_process(&site, p)?;
                 crate::projects::processes::enable(&self.store, &site, process_id, true)?;
@@ -598,6 +669,19 @@ impl Application {
                 self.active = true;
             }
             "stop" => {
+                self.paused.insert(format!("site:{id}:{process_id}"));
+                self.supervisor
+                    .stop(&self.store, &format!("site:{id}:{process_id}"))?;
+            }
+            "enable_autostart" | "disable_autostart" => {
+                crate::projects::processes::autostart(
+                    &self.store,
+                    &site,
+                    process_id,
+                    operation == "enable_autostart",
+                )?;
+            }
+            "disable" => {
                 crate::projects::processes::enable(&self.store, &site, process_id, false)?;
                 self.supervisor
                     .stop(&self.store, &format!("site:{id}:{process_id}"))?;
@@ -611,6 +695,12 @@ impl Application {
                 )?;
             }
             _ => return fail("Unknown process operation"),
+        }
+        if site.project_type == "laravel"
+            && process_id == "vite"
+            && !self.supervisor.contains(&format!("site:{id}:vite"))
+        {
+            crate::projects::vite::cleanup(&self.home, &site)?;
         }
         if self.active {
             self.start_required()?;
@@ -639,7 +729,34 @@ impl Application {
                     "No dev/start script was detected. Add a structured web process with a managed port before starting",
                 );
             }
+            for process in site
+                .processes
+                .iter()
+                .filter(|p| p.enabled && p.definition.id != "web")
+            {
+                self.paused.remove(&process.key);
+                if let Err(e) = self.start_project_process(&site, process) {
+                    self.issues.push(format!(
+                        "Project: {} / {}: {e}",
+                        site.hostname, process.definition.name
+                    ));
+                }
+            }
             return self.process_action(id, "web", operation);
+        }
+        if operation != "stop" {
+            for process in site.processes.iter().filter(|p| p.enabled) {
+                self.paused.remove(&process.key);
+                if let Err(e) = self.start_project_process(&site, process) {
+                    self.issues.push(format!(
+                        "Project: {} / {}: {e}",
+                        site.hostname, process.definition.name
+                    ));
+                }
+            }
+        }
+        if site.project_type == "laravel" && operation == "stop" {
+            crate::projects::vite::cleanup(&self.home, &site)?;
         }
         self.active = true;
         self.start_required()
@@ -679,16 +796,78 @@ impl Application {
         let mut d = d;
         d.args = vec!["install".into()];
         let spec = crate::tools::command(&self.store, &self.home, &site, &d, None)?;
-        let result = crate::process::run_logged(
-            &spec.binary,
-            &spec.args,
-            &spec.cwd,
-            &spec.env,
-            Duration::from_secs(600),
-            &spec.log,
-        );
-        self.scan()?;
-        result
+        crate::tools::tasks::start(&site.id, manager, spec)
+    }
+    fn refresh_live_routes(&mut self, services: &[ServiceState]) -> Result<()> {
+        for site in self.sites()?.iter().filter(|s| s.project_type == "laravel") {
+            if !self.supervisor.contains(&format!("site:{}:vite", site.id)) {
+                crate::projects::vite::cleanup(&self.home, site)?;
+            }
+        }
+        if !self.active {
+            return Ok(());
+        }
+        let mut routes = Vec::new();
+        for site in self.sites()? {
+            if self
+                .store
+                .setting(&format!("site.{}.disabled", site.id))?
+                .as_deref()
+                == Some("true")
+                || !site.present
+                || site.issue.is_some()
+                || site.metadata.error.is_some()
+            {
+                continue;
+            }
+            if site
+                .required_kinds()
+                .iter()
+                .filter(|k| **k != "node")
+                .any(|kind| {
+                    site.resolved.get(*kind).is_none_or(|v| {
+                        !services
+                            .iter()
+                            .any(|s| s.key == format!("{kind}:{v}") && s.healthy)
+                    })
+                })
+            {
+                continue;
+            }
+            let port = match site.metadata.route {
+                crate::projects::metadata::RouteStrategy::Static => Some(0),
+                crate::projects::metadata::RouteStrategy::PhpFastcgi => {
+                    site.resolved.get("php").and_then(|v| {
+                        services
+                            .iter()
+                            .find(|s| s.key == format!("php:{v}") && s.healthy)
+                            .and_then(|s| s.port)
+                    })
+                }
+                crate::projects::metadata::RouteStrategy::NodeProxy => services
+                    .iter()
+                    .find(|s| s.key == format!("site:{}:web", site.id) && s.healthy)
+                    .and_then(|s| s.port),
+            };
+            if let Some(port) = port {
+                routes.push((site, port));
+            }
+        }
+        if let Some(reference) = runtime::default_ref(&self.store, &RuntimeType::Caddy)? {
+            let runtime = runtime::find(&self.store, &reference)?;
+            crate::webserver::reconcile(
+                &self.store,
+                &self.home,
+                &mut self.supervisor,
+                &runtime,
+                &routes,
+            )?;
+            self.routed = routes
+                .iter()
+                .map(|(s, _)| (s.id.clone(), s.route_identity()))
+                .collect();
+        }
+        Ok(())
     }
     fn start_php(&mut self, runtime: &Installation) -> Result<()> {
         if self.supervisor.contains(&runtime.id) {
@@ -720,6 +899,7 @@ impl Application {
                 .home
                 .path("logs")
                 .join(format!("php-{}.log", runtime.manifest.version)),
+            health: crate::process::HealthStrategy::TcpListener,
             graceful: None,
         };
         drop(reserve);
@@ -730,13 +910,22 @@ impl Application {
     pub fn stop_all(&mut self) -> Result<()> {
         self.routed.clear();
         self.active = false;
-        self.supervisor.stop_all(&self.store)
+        self.supervisor.stop_all(&self.store)?;
+        for site in self.sites()?.iter().filter(|s| s.project_type == "laravel") {
+            crate::projects::vite::cleanup(&self.home, site)?;
+        }
+        Ok(())
     }
     pub fn shutdown(&mut self) -> Result<()> {
+        crate::tools::tasks::cancel_home(&self.home);
         self.active = false;
         self.routed.clear();
         self._dns = None;
-        self.supervisor.stop_all(&self.store)
+        self.supervisor.stop_all(&self.store)?;
+        for site in self.sites()?.iter().filter(|s| s.project_type == "laravel") {
+            crate::projects::vite::cleanup(&self.home, site)?;
+        }
+        Ok(())
     }
     pub fn restart(&mut self) -> Result<()> {
         self.routed.clear();

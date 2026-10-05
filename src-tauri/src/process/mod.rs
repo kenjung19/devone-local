@@ -11,6 +11,14 @@ use std::{
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthStrategy {
+    #[default]
+    ProcessAlive,
+    TcpListener,
+    Http,
+}
 #[derive(Clone)]
 pub struct Spec {
     pub key: String,
@@ -20,12 +28,14 @@ pub struct Spec {
     pub env: BTreeMap<String, String>,
     pub port: Option<u16>,
     pub log: PathBuf,
+    pub health: HealthStrategy,
     pub graceful: Option<(PathBuf, Vec<String>)>,
 }
 struct Owned {
     child: Child,
     spec: Spec,
     _ownership: platform::Ownership,
+    started: Instant,
 }
 struct Recovery {
     spec: Spec,
@@ -94,6 +104,7 @@ impl Supervisor {
                 child,
                 spec,
                 _ownership: ownership,
+                started: Instant::now(),
             },
         );
         if let Err(e)=store.conn.execute("INSERT INTO process_state(service_key,pid,status,updated_at) VALUES(?1,?2,'starting',?3) ON CONFLICT(service_key) DO UPDATE SET pid=excluded.pid,status=excluded.status,updated_at=excluded.updated_at",rusqlite::params![key,pid,timestamp()]) {
@@ -109,9 +120,7 @@ impl Supervisor {
             let Some(p) = self.children.get(key) else {
                 return fail(format!("{key} exited; inspect its log"));
             };
-            if p.spec.port.is_none_or(|port| {
-                PortManager::healthy(port) && p._ownership.owns_tcp_listener(port)
-            }) {
+            if process_healthy(p) {
                 store.conn.execute(
                     "UPDATE process_state SET status='running' WHERE service_key=?1",
                     [key],
@@ -210,13 +219,15 @@ impl Supervisor {
             let (key, pid, status) = row?;
             let child = self.children.get(&key);
             let port = child.and_then(|c| c.spec.port);
-            let healthy = child.is_some_and(|p| {
-                port.is_none_or(|port| {
-                    PortManager::healthy(port) && p._ownership.owns_tcp_listener(port)
-                })
-            });
+            let healthy = child.is_some_and(process_healthy);
             let actual = if child.is_some() {
-                if healthy { "running" } else { "unhealthy" }
+                if healthy {
+                    "running"
+                } else if status == "starting" {
+                    "starting"
+                } else {
+                    "failed"
+                }
             } else if self.recovery.get(&key).is_some_and(|r| r.blocked) {
                 "restart limit reached"
             } else {
@@ -242,6 +253,15 @@ impl Supervisor {
             })
         })
         .collect()
+    }
+    pub fn uses_path(&self, root: &std::path::Path) -> bool {
+        self.children.values().any(|p| {
+            p.spec.binary.starts_with(root)
+                || p.spec
+                    .args
+                    .iter()
+                    .any(|a| std::path::Path::new(a).starts_with(root))
+        })
     }
     pub fn contains(&self, key: &str) -> bool {
         self.children.contains_key(key)
@@ -428,5 +448,47 @@ pub fn run_logged(
             return fail(format!("Install timed out; see {}", log.display()));
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn listener_healthy(spec: &Spec, ownership: &platform::Ownership, port: u16) -> bool {
+    if !PortManager::healthy(port) || !ownership.owns_tcp_listener(port) {
+        return false;
+    }
+    if !matches!(spec.health, HealthStrategy::Http) {
+        return true;
+    }
+    let host = spec
+        .env
+        .get("DEVONE_SITE")
+        .map(String::as_str)
+        .unwrap_or("localhost");
+    let path = if spec.key.ends_with(":vite") {
+        "/__devone_vite/@vite/client"
+    } else {
+        "/"
+    };
+    reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(2))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .ok()
+        .and_then(|c| {
+            c.get(format!("http://127.0.0.1:{port}{path}"))
+                .header("Host", host)
+                .send()
+                .ok()
+        })
+        .is_some_and(|r| r.status().as_u16() < 500)
+}
+
+fn process_healthy(p: &Owned) -> bool {
+    match p.spec.health {
+        HealthStrategy::ProcessAlive => p.started.elapsed() >= Duration::from_millis(250),
+        HealthStrategy::TcpListener | HealthStrategy::Http => p
+            .spec
+            .port
+            .is_some_and(|port| listener_healthy(&p.spec, &p._ownership, port)),
     }
 }

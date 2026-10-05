@@ -159,6 +159,7 @@ impl DatabaseEngine for Mysql {
             env: BTreeMap::new(),
             port: Some(port),
             log,
+            health: crate::process::HealthStrategy::TcpListener,
             graceful: Some((
                 runtime.binary(home, "admin")?,
                 vec![

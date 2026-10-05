@@ -1,3 +1,4 @@
+import { ToolManager } from "./components/ToolManager";
 import { Badge } from "./components/Badge";
 import { Stat, SiteDetail } from "./components/SiteDetail";
 import { ImportDialog, PhpDialog } from "./components/RuntimeDialogs";
@@ -9,8 +10,15 @@ import { useCallback, useEffect, useState } from "react";
 import { bridge, desktop } from "./bridge";
 import type { Action, Snapshot, RuntimeKind, Installation } from "./contracts";
 import { bindingLabel, availableSiteCount } from "./presentation";
-type Page = "Sites" | "Runtimes" | "Databases" | "Logs" | "Settings";
-const pages: Page[] = ["Sites", "Runtimes", "Databases", "Logs", "Settings"];
+type Page = "Sites" | "Runtimes" | "Tools" | "Databases" | "Logs" | "Settings";
+const pages: Page[] = [
+  "Sites",
+  "Runtimes",
+  "Tools",
+  "Databases",
+  "Logs",
+  "Settings",
+];
 const kinds: RuntimeKind[] = ["php", "mysql", "node", "caddy"];
 export default function App() {
   const [logSite, setLogSite] = useState<
@@ -126,7 +134,9 @@ export default function App() {
                 setSelected(null);
               }}
             >
-              <span className="nav-icon">{["◫", "◇", "▤", "≡", "⚙"][i]}</span>
+              <span className="nav-icon">
+                {["◫", "◇", "⚒", "▤", "≡", "⚙"][i]}
+              </span>
               {p}
               {p === "Sites" && <span className="count">{count}</span>}
             </button>
@@ -362,6 +372,9 @@ export default function App() {
                       )}
                     </>
                   ))}
+                {page === "Tools" && (
+                  <ToolManager data={data} busy={busy} act={act} />
+                )}
                 {page === "Runtimes" && (
                   <>
                     {kinds.map((kind) => (

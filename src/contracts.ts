@@ -28,7 +28,9 @@ export interface Site {
   present: boolean;
   issue: string | null;
   overrides: Record<string, string>;
+  local_overrides?: Record<string, string>;
   resolved: Record<string, string>;
+  runtime_sources?: Record<string, string>;
   status: string;
   https: string;
   discovered_at: number;
@@ -51,6 +53,8 @@ export interface Database {
   port: number | null;
 }
 export interface Snapshot {
+  tool_defaults?: Record<string, string>;
+  dependency_tasks?: DependencyTask[];
   tools?: Tool[];
   available_tools?: Tool[];
   home: string;
@@ -114,9 +118,29 @@ export type Action =
       type: "site_process";
       site_id: string;
       process_id: string;
-      operation: "start" | "stop" | "restart" | "remove";
+      operation:
+        | "start"
+        | "stop"
+        | "restart"
+        | "remove"
+        | "enable_autostart"
+        | "disable_autostart"
+        | "disable";
     }
-  | { type: "save_process"; site_id: string; definition: ProcessDefinition }
+  | {
+      type: "save_process";
+      site_id: string;
+      definition: ProcessDefinition;
+      replace?: boolean;
+    }
+  | {
+      type: "tool_action";
+      id: string;
+      version: string;
+      operation: "default" | "validate" | "remove";
+      runtime_version: string | null;
+    }
+  | { type: "cancel_dependencies"; site_id: string }
   | { type: "save_portable"; site_id: string }
   | {
       type: "install_dependencies";
@@ -183,6 +207,7 @@ export interface ProcessDefinition {
   cwd: string;
   env: Record<string, string>;
   port: boolean;
+  health?: "process_alive" | "tcp_listener" | "http" | null;
   autostart: boolean;
 }
 export interface ProjectProcess {
@@ -201,10 +226,21 @@ export interface ProjectMetadata {
   package_manager: string | null;
   package_manager_version: string | null;
   dev_script: string | null;
+  scripts?: string[];
   build_script: string | null;
   route: "php_fastcgi" | "node_proxy" | "static";
   node_dependencies: boolean;
+  node_dependency_state?: string;
+  composer_dependency_state?: string;
   composer_dependencies: boolean;
   composer_manifest?: boolean;
+  error: string | null;
+}
+
+export interface DependencyTask {
+  site_id: string;
+  manager: string;
+  status: string;
+  log: string;
   error: string | null;
 }

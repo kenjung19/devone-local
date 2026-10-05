@@ -1,11 +1,18 @@
 import type { Site } from "./contracts";
 export function bindingLabel(
-  site: Pick<Site, "overrides" | "resolved">,
+  site: Pick<Site, "overrides" | "resolved" | "runtime_sources">,
   kind: string,
 ): string {
   const version = site.resolved[kind];
   if (!version) return "Not configured";
-  return version + (site.overrides[kind] ? " · override" : " · default");
+  return (
+    version +
+    (site.runtime_sources?.[kind]
+      ? ` · ${site.runtime_sources[kind]}`
+      : site.overrides[kind]
+        ? " · override"
+        : " · default")
+  );
 }
 export function availableSiteCount(sites: Pick<Site, "present">[]): number {
   return sites.filter((s) => s.present).length;
