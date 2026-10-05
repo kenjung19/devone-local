@@ -502,21 +502,41 @@ fn native_database_backup_restore_and_delete_preserve_unrelated_data() {
 #[test]
 #[ignore = "Requires Mailpit official artifact network access"]
 fn native_optional_mailpit_accepts_smtp_and_stops_owned_service() {
-    use std::io::{Read, Write};
+    use std::io::{BufRead, BufReader, Write};
     let d = tempfile::tempdir().unwrap();
     let mut a = app(d.path());
     devone::tools::install(&a.store, &a.home, "mailpit", "1.31.3", None).unwrap();
     devone::phase3::mail::action(&mut a, "start").unwrap();
     let state = devone::phase3::mail::state(&mut a).unwrap();
     assert!(state.running);
-    let mut smtp = std::net::TcpStream::connect(("127.0.0.1", state.smtp_port.unwrap())).unwrap();
-    smtp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-    let mut bytes = [0; 1024];
-    let n = smtp.read(&mut bytes).unwrap();
-    assert!(String::from_utf8_lossy(&bytes[..n]).starts_with("220"));
-    smtp.write_all(b"EHLO localhost\r\n").unwrap();
-    let n = smtp.read(&mut bytes).unwrap();
-    assert!(String::from_utf8_lossy(&bytes[..n]).starts_with("250"));
+    let mut smtp = BufReader::new(
+        std::net::TcpStream::connect(("127.0.0.1", state.smtp_port.unwrap())).unwrap(),
+    );
+    smtp.get_ref()
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    fn response(smtp: &mut BufReader<std::net::TcpStream>, code: &str) {
+        loop {
+            let mut line = String::new();
+            smtp.read_line(&mut line).unwrap();
+            assert!(line.starts_with(code), "Unexpected SMTP response: {line}");
+            if line.as_bytes().get(3) == Some(&b' ') {
+                break;
+            }
+        }
+    }
+    response(&mut smtp, "220");
+    for (command, code) in [
+        ("EHLO localhost\r\n", "250"),
+        ("MAIL FROM:<acceptance@example.invalid>\r\n", "250"),
+        ("RCPT TO:<local@example.invalid>\r\n", "250"),
+        ("DATA\r\n", "354"),
+    ] {
+        smtp.get_mut().write_all(command.as_bytes()).unwrap();
+        response(&mut smtp, code);
+    }
+    smtp.get_mut().write_all(b"From: acceptance@example.invalid\r\nTo: local@example.invalid\r\nSubject: DEVONE persistence acceptance\r\n\r\nLocal acceptance message\r\n.\r\n").unwrap();
+    response(&mut smtp, "250");
     drop(smtp);
     let page = reqwest::blocking::Client::builder()
         .no_proxy()
@@ -526,9 +546,37 @@ fn native_optional_mailpit_accepts_smtp_and_stops_owned_service() {
         .send()
         .unwrap();
     assert!(page.status().is_success());
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap();
+    let api = format!(
+        "http://127.0.0.1:{}/api/v1/message/latest/raw",
+        state.web_port.unwrap()
+    );
+    assert!(
+        client
+            .get(&api)
+            .send()
+            .unwrap()
+            .text()
+            .unwrap()
+            .contains("DEVONE persistence acceptance")
+    );
     devone::phase3::mail::action(&mut a, "stop").unwrap();
     assert!(!devone::phase3::mail::state(&mut a).unwrap().running);
     assert!(std::net::TcpStream::connect(("127.0.0.1", state.smtp_port.unwrap())).is_err());
+    devone::phase3::mail::action(&mut a, "start").unwrap();
+    assert!(
+        client
+            .get(&api)
+            .send()
+            .unwrap()
+            .text()
+            .unwrap()
+            .contains("DEVONE persistence acceptance")
+    );
+    devone::phase3::mail::action(&mut a, "stop").unwrap();
 }
 
 #[test]
@@ -580,7 +628,11 @@ fn native_laravel_creation_sets_only_new_project_environment() {
     r.runtimes
         .insert("php".into(), php.manifest.version.clone());
     r.tools.insert("composer".into(), "2.10.3".into());
-    let id = templates::start(&a.store, &a.home, r, None, None).unwrap();
+    devone::tools::install(&a.store, &a.home, "mailpit", "1.31.3", None).unwrap();
+    devone::phase3::mail::action(&mut a, "start").unwrap();
+    let mail = devone::phase3::mail::state(&mut a).unwrap();
+    r.configure_mail = true;
+    let id = templates::start(&a.store, &a.home, r, None, mail.smtp_port).unwrap();
     let t = wait(&a, &id);
     if t.status != "completed" {
         panic!(
@@ -597,6 +649,33 @@ fn native_laravel_creation_sets_only_new_project_environment() {
     let environment = std::fs::read_to_string(Path::new(&site.project_path).join(".env")).unwrap();
     assert!(environment.contains("APP_URL=\"https://new-laravel.test\""));
     assert!(environment.contains("APP_KEY=base64:"));
+    assert!(environment.contains("MAIL_HOST=\"127.0.0.1\""));
+    assert!(environment.contains(&format!("MAIL_PORT=\"{}\"", mail.smtp_port.unwrap())));
+    let env = devone::tools::environment(&a.store, &a.home, &site).unwrap();
+    let code = r#"require 'vendor/autoload.php'; $app=require 'bootstrap/app.php'; $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap(); Illuminate\Support\Facades\Mail::raw('DEVONE Laravel mail acceptance', function($m){$m->to('local@example.invalid')->subject('Laravel Mailpit opt-in acceptance');}); echo 'mail-sent';"#;
+    let output = devone::process::run_checked(
+        &php.binary(&a.home, "cli").unwrap(),
+        &["-r".into(), code.into()],
+        Path::new(&site.project_path),
+        &env,
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    assert!(output.contains("mail-sent"));
+    let raw = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .get(format!(
+            "http://127.0.0.1:{}/api/v1/message/latest/raw",
+            mail.web_port.unwrap()
+        ))
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(raw.contains("Laravel Mailpit opt-in acceptance"));
+    devone::phase3::mail::action(&mut a, "stop").unwrap();
     assert!(
         Path::new(&site.project_path)
             .join("vendor/autoload.php")
