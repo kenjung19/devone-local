@@ -3,9 +3,18 @@ export function Badge({ value }: { value: string }) {
     <span
       className={
         "badge " +
-        (value === "running" || value === "trusted"
+        (value.toLowerCase() === "running" ||
+        value === "trusted" ||
+        value === "Ready"
           ? "good"
-          : value === "missing" || value === "conflict" || value === "unhealthy"
+          : [
+                "missing",
+                "conflict",
+                "unhealthy",
+                "Error",
+                "Missing folder",
+                "failed",
+              ].includes(value)
             ? "bad"
             : "")
       }

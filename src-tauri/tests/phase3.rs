@@ -185,6 +185,7 @@ fn custom_template_creation_is_explicit_and_failure_cleans_only_owned_staging() 
     .unwrap();
     let t = wait(&a, &id);
     assert_eq!(t.status, "failed");
+    assert_ne!(t.stage, "failed", "Keep the stage that failed");
     assert!(t.error.is_some());
     assert!(!a.home.www().join("failed").exists());
     assert!(!a.home.path("cache/project-staging").join(&id).exists());

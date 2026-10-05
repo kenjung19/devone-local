@@ -92,11 +92,18 @@ export function ProductSettings({
         </p>
         <div className="panel-buttons">
           <button disabled={busy} onClick={() => void act({ type: "dns" })}>
-            Setup / Retry DNS
+            Set up local domains
           </button>
           <button
             disabled={busy || !data.setup.dns_policy}
-            onClick={() => void act({ type: "remove_dns" })}
+            onClick={() => {
+              if (
+                window.confirm(
+                  "Remove automatic .test local domains? Sites will not open through local domains until setup is restored.",
+                )
+              )
+                void act({ type: "remove_dns" });
+            }}
           >
             Remove DEVONE DNS integration
           </button>
@@ -127,7 +134,14 @@ export function ProductSettings({
           </button>
           <button
             disabled={busy || !data.setup.ca_trusted}
-            onClick={() => void act({ type: "remove_trust" })}
+            onClick={() => {
+              if (
+                window.confirm(
+                  "Remove HTTPS trust? Browsers may warn about local sites until trust is restored.",
+                )
+              )
+                void act({ type: "remove_trust" });
+            }}
           >
             Remove trust
           </button>
@@ -144,6 +158,10 @@ export function ProductSettings({
           <section
             className="dialog"
             role="dialog"
+            aria-modal="true"
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && !busy) setConfirmCa(false);
+            }}
             aria-labelledby="recreate-ca-title"
           >
             <h2 id="recreate-ca-title">Recreate DEVONE Local CA?</h2>

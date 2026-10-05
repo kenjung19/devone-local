@@ -56,6 +56,12 @@ export function ImportDialog({
     <div className="overlay">
       <form
         className="dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="runtime-dialog-title"
+        onKeyDown={(e) => {
+          if (e.key === "Escape" && !busy) close();
+        }}
         onSubmit={(e) => {
           e.preventDefault();
           try {
@@ -85,8 +91,15 @@ export function ImportDialog({
           }
         }}
       >
-        <h2>
-          Import {kind === "php" ? "PHP" : kind === "mysql" ? "MySQL" : "Caddy"}{" "}
+        <h2 id="runtime-dialog-title">
+          Import{" "}
+          {kind === "php"
+            ? "PHP"
+            : kind === "mysql"
+              ? "MySQL"
+              : kind === "node"
+                ? "Node"
+                : "Web Server"}{" "}
           runtime
         </h2>
         <p>
@@ -186,6 +199,12 @@ export function PhpDialog({
     <div className="overlay">
       <form
         className="dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="runtime-dialog-title"
+        onKeyDown={(e) => {
+          if (e.key === "Escape" && !busy) close();
+        }}
         onSubmit={(e) => {
           e.preventDefault();
           void act({
@@ -195,7 +214,7 @@ export function PhpDialog({
           });
         }}
       >
-        <h2>PHP {runtime.manifest.version}</h2>
+        <h2 id="runtime-dialog-title">PHP {runtime.manifest.version}</h2>
         {error && (
           <p className="error" role="alert">
             {error}

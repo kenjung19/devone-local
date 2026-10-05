@@ -505,7 +505,10 @@ pub fn start(
             "failed"
         }
         .into();
-        j.task.stage = j.task.status.clone();
+        // Preserve the failed/cancelled stage for recovery.
+        if result.is_ok() {
+            j.task.stage = "Completed".into();
+        }
         j.task.error = result.err().map(|e| e.to_string());
         if let Err(e) = persist(&j.task) {
             tracing::error!(error=%e,"creation state persistence failed");

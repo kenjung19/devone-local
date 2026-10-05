@@ -13,6 +13,7 @@ use tauri::{
 #[derive(Clone, PartialEq)]
 pub struct TrayView {
     pub editor_available: bool,
+    pub domains_ready: bool,
     pub status: String,
     pub sites: Vec<(String, String, bool)>,
 }
@@ -34,7 +35,7 @@ pub fn view(core: &mut Application) -> crate::core::Result<TrayView> {
         .into_iter()
         .filter(|s| s.present)
         .map(|s| {
-            let enabled = ready && s.status == "running";
+            let enabled = matches!(s.status.as_str(), "running" | "starting");
             (s.id, s.hostname, enabled)
         })
         .collect();
@@ -44,6 +45,7 @@ pub fn view(core: &mut Application) -> crate::core::Result<TrayView> {
     });
     Ok(TrayView {
         editor_available,
+        domains_ready: ready,
         status: status.into(),
         sites,
     })
@@ -71,15 +73,6 @@ fn menu(app: &tauri::AppHandle, state: &TrayView) -> tauri::Result<Menu<tauri::W
         true,
         None::<&str>,
     )?)?;
-    let environment = Submenu::new(app, "Environment", true)?;
-    for (id, text) in [
-        ("start", "Start All"),
-        ("stop", "Stop All"),
-        ("restart", "Restart"),
-    ] {
-        environment.append(&MenuItem::with_id(app, id, text, true, None::<&str>)?)?;
-    }
-    menu.append(&environment)?;
     let sites = Submenu::new(app, "Sites", true)?;
     if state.sites.is_empty() {
         sites.append(&MenuItem::with_id(
@@ -93,7 +86,12 @@ fn menu(app: &tauri::AppHandle, state: &TrayView) -> tauri::Result<Menu<tauri::W
     for (id, hostname, enabled) in &state.sites {
         let project = Submenu::new(app, hostname, true)?;
         for (operation, label, available) in [
-            ("site", "Open Site", *enabled),
+            ("site", "Open Site", *enabled && state.domains_ready),
+            (
+                if *enabled { "stop-site" } else { "start-site" },
+                if *enabled { "Stop" } else { "Start" },
+                true,
+            ),
             ("folder", "Open Folder", true),
             ("editor", "Open in Default Editor", true),
             ("terminal", "Terminal", true),
@@ -119,6 +117,9 @@ fn menu(app: &tauri::AppHandle, state: &TrayView) -> tauri::Result<Menu<tauri::W
         true,
         None::<&str>,
     )?)?;
+    for (id, text) in [("start", "Start All"), ("stop", "Stop All")] {
+        menu.append(&MenuItem::with_id(app, id, text, true, None::<&str>)?)?;
+    }
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&MenuItem::with_id(
         app,
@@ -150,6 +151,7 @@ pub fn install(
 ) -> tauri::Result<()> {
     let initial = TrayView {
         editor_available: false,
+        domains_ready: false,
         status: "Starting".into(),
         sites: vec![],
     };
@@ -201,6 +203,12 @@ pub fn install(
                         "restart" => core.restart(),
                         "quit" => core.shutdown(),
                         "www" => crate::platform::open(&core.home.www().to_string_lossy()),
+                        _ if action.starts_with("start-site:") => {
+                            core.site_action(&action[11..], "start")
+                        }
+                        _ if action.starts_with("stop-site:") => {
+                            core.site_action(&action[10..], "stop")
+                        }
                         _ if action.starts_with("folder:") => {
                             let site = core.site(&action[7..])?;
                             crate::platform::open(&site.project_path)

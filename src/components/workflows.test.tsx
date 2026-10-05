@@ -1,3 +1,5 @@
+import { SitesOverview } from "./SitesOverview";
+import { siteProblems, initialVersions, versionLabel } from "../presentation";
 import { NewProject } from "./NewProject";
 import { DatabaseManager } from "./DatabaseManager";
 import { DeveloperSettings } from "./DeveloperSettings";
@@ -470,5 +472,126 @@ describe("Phase 3 workflows", () => {
     expect(html).toContain("machine-local");
     expect(html).not.toContain("Open in Cursor");
     expect(html).toContain("Automatic scheduling and deletion are not enabled");
+  });
+});
+
+describe("daily Windows workflows", () => {
+  it("offers copy/create in an empty workspace without Add Site", () => {
+    const html = renderToStaticMarkup(
+      <SitesOverview
+        data={{ ...data, sites: [] }}
+        busy={false}
+        act={act}
+        view={() => {}}
+        create={() => {}}
+      />,
+    );
+    expect(html).toContain("No projects yet.");
+    expect(html).toContain("Open www");
+    expect(html).toContain("New Project");
+    expect(html).not.toContain("Add Site");
+  });
+  it("shows PHP and Node on hybrid projects and a sole editor without a default requirement", () => {
+    const html = renderToStaticMarkup(
+      <SitesOverview
+        data={
+          {
+            ...data,
+            sites: [{ ...site, resolved: { php: "8.5.1", node: "24.21.0" } }],
+            developer: {
+              templates: [],
+              template_error: null,
+              creation_tasks: [],
+              default_editor: null,
+              managed_databases: [],
+              backups: [],
+              mail: {
+                installed: false,
+                running: false,
+                smtp_port: null,
+                web_port: null,
+              },
+              database_catalog: {},
+              backup_preferences: { automatic: false, keep_last: 7 },
+              diagnostic_report: null,
+              preferences: {},
+              editors: [
+                {
+                  id: "vscode",
+                  name: "VS Code",
+                  category: "editor",
+                  executable: "C:/code.exe",
+                  args: [],
+                },
+              ],
+            },
+          } as Snapshot
+        }
+        busy={false}
+        act={act}
+        view={() => {}}
+        create={() => {}}
+      />,
+    );
+    expect(html).toContain("PHP 8.5.1 / Node 24.21.0");
+    expect(html).toContain("Open in VS Code");
+    expect(html).toContain("Terminal");
+    expect(html).not.toContain("MySQL 8");
+  });
+  it("offers only an exact available missing-runtime action", () => {
+    const s = { ...site, resolved: { php: "7.4.33" } };
+    const p = siteProblems(s, {
+      ...data,
+      available: [
+        {
+          ...php.manifest,
+          version: "7.4.33",
+          download: "https://example.test/php.zip",
+          sha256: "a".repeat(64),
+        },
+      ],
+    });
+    expect(p[0].action).toEqual({
+      type: "install",
+      runtime: { kind: "php", version: "7.4.33" },
+    });
+    expect(siteProblems(s, data)[0].action).toBeUndefined();
+  });
+  it("keeps an older selected default and displays catalog channels without upgrading", () => {
+    expect(initialVersions({ ...data, defaults: { php: "7.4.33" } }).php).toBe(
+      "7.4.33",
+    );
+    expect(
+      versionLabel({
+        ...php.manifest,
+        runtime: "node",
+        version: "24.21.0",
+        metadata: { channel: "LTS" },
+      }),
+    ).toBe("Node 24.21.0 LTS");
+  });
+  it("does not offer default selection for a service tool", () => {
+    const html = renderToStaticMarkup(
+      <ToolManager
+        data={{
+          ...data,
+          tools: [
+            {
+              id: "mailpit",
+              version: "1.31.3",
+              url: "",
+              sha256: "",
+              entry: "",
+            },
+          ],
+          tool_defaults: { mailpit: "1.31.3" },
+        }}
+        busy={false}
+        act={act}
+      />,
+    );
+    expect(html).toContain("Local mail service - Stopped");
+    expect(html).toContain("Open Mailbox");
+    expect(html).not.toContain("Set default");
   });
 });

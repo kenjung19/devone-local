@@ -1,3 +1,4 @@
+import { ErrorNotice } from "./ErrorNotice";
 import { useState } from "react";
 import type {
   Snapshot,
@@ -8,10 +9,10 @@ import type {
 import { SetupRuntime } from "./SetupRuntime";
 const steps = [
   "Home",
-  "Caddy",
+  "Web Server",
   "PHP",
   "MySQL",
-  "DNS",
+  "Local Domains",
   "HTTPS",
   "พร้อมเริ่มงาน",
 ];
@@ -139,15 +140,15 @@ export function Setup({
               </p>
               <dl className="setup-checks">
                 <div>
-                  <dt>DNS policy</dt>
+                  <dt>Automatic .test domains</dt>
                   <dd>{s.dns_policy ? "ติดตั้งแล้ว" : "ต้องตั้งค่า"}</dd>
                 </div>
                 <div>
-                  <dt>Resolver</dt>
+                  <dt>Local domain service</dt>
                   <dd>{s.dns_server ? "ทำงานอยู่" : "ตรวจพอร์ต UDP/TCP 53"}</dd>
                 </div>
                 <div>
-                  <dt>Windows lookup</dt>
+                  <dt>Domain availability</dt>
                   <dd>
                     {s.dns_system && s.dns_server
                       ? "พร้อมใช้งาน"
@@ -221,11 +222,7 @@ export function Setup({
               {progress.total ? "/ " + progress.total.toLocaleString() : ""}
             </p>
           )}
-          {error && (
-            <p className="error" role="alert">
-              {error}
-            </p>
-          )}
+          <ErrorNotice error={error} />
         </div>
         <footer className="setup-controls">
           <button

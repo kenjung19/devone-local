@@ -1,10 +1,12 @@
+import { SitesOverview } from "./components/SitesOverview";
+import { RuntimePanel } from "./components/RuntimePanel";
+import { ErrorNotice } from "./components/ErrorNotice";
 import { NewProject } from "./components/NewProject";
 import { DatabaseManager } from "./components/DatabaseManager";
 import { DeveloperSettings, Diagnostics } from "./components/DeveloperSettings";
 import { listen } from "@tauri-apps/api/event";
 import { ToolManager } from "./components/ToolManager";
-import { Badge } from "./components/Badge";
-import { Stat, SiteDetail } from "./components/SiteDetail";
+import { SiteDetail } from "./components/SiteDetail";
 import { ImportDialog, PhpDialog } from "./components/RuntimeDialogs";
 import { Setup } from "./components/Setup";
 import { ProductSettings } from "./components/ProductSettings";
@@ -13,10 +15,9 @@ import { Logs } from "./components/Logs";
 import { useCallback, useEffect, useState } from "react";
 import { bridge, desktop } from "./bridge";
 import type { Action, Snapshot, RuntimeKind, Installation } from "./contracts";
-import { bindingLabel, availableSiteCount } from "./presentation";
+import { availableSiteCount } from "./presentation";
 type Page =
   | "New Project"
-  | "Diagnostics"
   | "Sites"
   | "Runtimes"
   | "Tools"
@@ -27,13 +28,11 @@ const pages: Page[] = [
   "Sites",
   "New Project",
   "Runtimes",
-  "Tools",
   "Databases",
+  "Tools",
   "Logs",
-  "Diagnostics",
   "Settings",
 ];
-const kinds: RuntimeKind[] = ["php", "mysql", "node", "caddy"];
 export default function App() {
   const [logSite, setLogSite] = useState<
     Snapshot["sites"][number] | undefined
@@ -47,6 +46,7 @@ export default function App() {
   const [data, setData] = useState<Snapshot | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [pending, setPending] = useState<Action | null>(null);
   const [notice, setNotice] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [importKind, setImportKind] = useState<RuntimeKind | null>(null);
@@ -93,16 +93,19 @@ export default function App() {
     setProgress(null);
     setInstalling(action.type === "install");
     setBusy(true);
+    setPending(action);
     setError("");
     setNotice("");
     try {
       const result = await bridge.execute(action);
       setData(result.snapshot);
+      if (action.type === "finish_setup") setPage("Sites");
       if (result.message) setNotice(result.message);
     } catch (e) {
       setError(String(e));
     } finally {
       setBusy(false);
+      setPending(null);
       setInstalling(false);
       void refresh();
     }
@@ -120,7 +123,7 @@ export default function App() {
           act={act}
           close={() => {
             setSetupDismissed(true);
-            setPage("Settings");
+            setPage("Sites");
           }}
           importRuntime={setImportKind}
         />
@@ -165,10 +168,9 @@ export default function App() {
                     "\u25eb",
                     "+",
                     "\u25c7",
-                    "\u2692",
                     "\u25a4",
+                    "\u2692",
                     "\u2261",
-                    "\u25ce",
                     "\u2699",
                   ][i]
                 }
@@ -204,44 +206,46 @@ export default function App() {
                   : page === "Runtimes"
                     ? "Install once. Run different versions side by side."
                     : page === "Databases"
-                      ? "Persistent engine instances shared by runtime version."
+                      ? "Your local MySQL databases and backups."
                       : page === "Logs"
-                        ? "Live output from DEVONE-owned services."
+                        ? "Choose a log stream to investigate a problem."
                         : "One home for your projects and native tools."}
               </p>
             </div>
-            <div className="actions">
-              {page === "Sites" && (
+            {page === "Sites" && (
+              <div className="actions">
+                {page === "Sites" && (
+                  <button
+                    disabled={busy || !desktop}
+                    onClick={() => {
+                      setPage("New Project");
+                      setSelected(null);
+                    }}
+                  >
+                    New Project
+                  </button>
+                )}
                 <button
                   disabled={busy || !desktop}
-                  onClick={() => {
-                    setPage("New Project");
-                    setSelected(null);
-                  }}
+                  onClick={() => void act({ type: "stop" })}
                 >
-                  New Project
+                  Stop All
                 </button>
-              )}
-              <button
-                disabled={busy || !desktop}
-                onClick={() => void act({ type: "stop" })}
-              >
-                Stop All
-              </button>
-              <button
-                disabled={busy || !desktop}
-                onClick={() => void act({ type: "restart" })}
-              >
-                Restart
-              </button>
-              <button
-                className="primary"
-                disabled={busy || !desktop}
-                onClick={() => void act({ type: "start" })}
-              >
-                {busy ? "Working…" : "▶ Start All"}
-              </button>
-            </div>
+                <button
+                  disabled={busy || !desktop}
+                  onClick={() => void act({ type: "restart" })}
+                >
+                  Restart
+                </button>
+                <button
+                  className="primary"
+                  disabled={busy || !desktop}
+                  onClick={() => void act({ type: "start" })}
+                >
+                  {busy ? "Working…" : "▶ Start All"}
+                </button>
+              </div>
+            )}
           </div>
           {!desktop && (
             <div className="alert">
@@ -257,11 +261,14 @@ export default function App() {
               {progress.total ? "/ " + progress.total.toLocaleString() : ""}
             </div>
           )}
-          {error && (
-            <div className="alert error" role="alert">
-              {error}
-            </div>
+          {busy && !progress && (
+            <p className="alert" role="status">
+              {pending?.type === "site_action"
+                ? `${pending.operation === "start" ? "Starting" : pending.operation === "stop" ? "Stopping" : "Restarting"} site...`
+                : "Working..."}
+            </p>
           )}
+          <ErrorNotice error={error} />
           {notice && (
             <div className="alert success" style={{ whiteSpace: "pre-wrap" }}>
               {notice}
@@ -291,321 +298,25 @@ export default function App() {
                       back={() => setSelected(null)}
                     />
                   ) : (
-                    <>
-                      <div className="stats">
-                        <Stat label="DISCOVERED SITES" value={String(count)} />
-                        <Stat
-                          label="RUNNING SERVICES"
-                          value={String(
-                            data.services.filter((s) => s.healthy).length,
-                          )}
-                        />
-                        <Stat
-                          label="LOCAL DOMAINS"
-                          value={data.dns_ready ? "Ready" : "Setup required"}
-                        />
-                        <Stat
-                          label="LOCAL CA"
-                          value={data.ca_present ? "Created" : "Not created"}
-                        />
-                      </div>
-                      <div className="panel">
-                        <div className="panel-header">
-                          <h2>
-                            Projects <span className="muted">{count}</span>
-                          </h2>
-                          <div className="actions">
-                            <button
-                              disabled={busy}
-                              onClick={() =>
-                                void act({ type: "open_folder", site_id: null })
-                              }
-                            >
-                              Open www
-                            </button>
-                            <button
-                              disabled={busy}
-                              onClick={() => void act({ type: "scan" })}
-                            >
-                              Rescan
-                            </button>
-                          </div>
-                        </div>
-                        {count === 0 ? (
-                          <div className="empty">
-                            <span className="empty-icon">◫</span>
-                            <h3>Your next project starts here</h3>
-                            <p>
-                              Put a project folder inside{" "}
-                              <code>{data.home}/www</code>.<br />
-                              DEVONE discovers direct child directories
-                              automatically.
-                            </p>
-                            <button
-                              onClick={() =>
-                                void act({ type: "open_folder", site_id: null })
-                              }
-                            >
-                              Open project directory
-                            </button>
-                          </div>
-                        ) : (
-                          <table>
-                            <thead>
-                              <tr>
-                                <th>PROJECT</th>
-                                <th>RUNTIME</th>
-                                <th>DATABASE</th>
-                                <th>HTTPS</th>
-                                <th>STATUS</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {data.sites
-                                .filter((s) => s.present)
-                                .sort((a, b) => {
-                                  const p = data.developer?.preferences;
-                                  const av = p?.[a.id],
-                                    bv = p?.[b.id];
-                                  return (
-                                    Number(bv?.favorite ?? false) -
-                                      Number(av?.favorite ?? false) ||
-                                    Math.max(
-                                      bv?.opened_at ?? 0,
-                                      bv?.created_at ?? 0,
-                                    ) -
-                                      Math.max(
-                                        av?.opened_at ?? 0,
-                                        av?.created_at ?? 0,
-                                      ) ||
-                                    a.name.localeCompare(b.name)
-                                  );
-                                })
-                                .map((s) => (
-                                  <tr
-                                    key={s.id}
-                                    onClick={() => {
-                                      setSelected(s.id);
-                                      void act({
-                                        type: "site_preference",
-                                        site_id: s.id,
-                                        operation: "opened",
-                                      });
-                                    }}
-                                    className="clickable"
-                                  >
-                                    <td>
-                                      <div className="project-cell">
-                                        <span className="project-icon">
-                                          {s.project_type === "laravel"
-                                            ? "L"
-                                            : "P"}
-                                        </span>
-                                        <div>
-                                          <strong>
-                                            {data.developer?.preferences[s.id]
-                                              ?.favorite
-                                              ? "★ "
-                                              : ""}
-                                            {s.hostname}
-                                          </strong>
-                                          <small>
-                                            {s.project_type === "laravel"
-                                              ? "Laravel"
-                                              : s.project_type.toUpperCase()}
-                                          </small>
-                                        </div>
-                                      </div>
-                                    </td>
-                                    <td>
-                                      {s.project_type === "static"
-                                        ? "Static"
-                                        : bindingLabel(
-                                            s,
-                                            s.resolved.node && !s.resolved.php
-                                              ? "node"
-                                              : "php",
-                                          )}
-                                    </td>
-                                    <td>
-                                      {s.resolved.mysql
-                                        ? bindingLabel(s, "mysql")
-                                        : "—"}
-                                    </td>
-                                    <td>
-                                      <Badge value={s.https} />
-                                    </td>
-                                    <td>
-                                      <Badge value={s.status} />
-                                      <span className="chevron">›</span>
-                                    </td>
-                                  </tr>
-                                ))}
-                            </tbody>
-                          </table>
-                        )}
-                      </div>
-                      {data.sites.some((s) => !s.present) && (
-                        <p className="footnote">
-                          {data.sites.filter((s) => !s.present).length} missing
-                          project record(s) retained. Project files and database
-                          data are preserved.
-                        </p>
-                      )}
-                    </>
+                    <SitesOverview
+                      data={data}
+                      busy={busy}
+                      act={act}
+                      view={setSelected}
+                      create={() => setPage("New Project")}
+                    />
                   ))}
                 {page === "Tools" && (
                   <ToolManager data={data} busy={busy} act={act} />
                 )}
                 {page === "Runtimes" && (
-                  <>
-                    {kinds.map((kind) => (
-                      <section className="panel" key={kind}>
-                        <div className="panel-header">
-                          <div>
-                            <h2>
-                              {kind === "php"
-                                ? "PHP"
-                                : kind === "mysql"
-                                  ? "MySQL"
-                                  : kind === "node"
-                                    ? "Node.js"
-                                    : "Caddy"}
-                            </h2>
-                            <p>
-                              {kind === "php"
-                                ? "Version-based FastCGI pools"
-                                : kind === "mysql"
-                                  ? "One persistent instance per engine version"
-                                  : kind === "node"
-                                    ? "Per-site Node versions and managed processes"
-                                    : "Local routing and automatic HTTPS"}
-                            </p>
-                          </div>
-                          <button
-                            onClick={() => setImportKind(kind)}
-                            disabled={busy}
-                          >
-                            ＋ Import Runtime
-                          </button>
-                        </div>
-                        <h3 className="panel-copy">Installed</h3>
-                        {data.installed
-                          .filter((r) => r.manifest.runtime === kind)
-                          .map((r) => (
-                            <div className="runtime-row" key={r.id}>
-                              <div>
-                                <strong>{r.manifest.version}</strong>{" "}
-                                <Badge value="installed" />
-                                {data.defaults[kind] === r.manifest.version && (
-                                  <span className="default-tag">DEFAULT</span>
-                                )}
-                                <small>{r.relative_path}</small>
-                              </div>
-                              <div className="actions">
-                                {kind === "php" && (
-                                  <button onClick={() => setPhp(r)}>
-                                    Configure
-                                  </button>
-                                )}
-                                <button
-                                  disabled={busy}
-                                  onClick={() =>
-                                    void act({
-                                      type: "validate",
-                                      runtime: {
-                                        kind,
-                                        version: r.manifest.version,
-                                      },
-                                    })
-                                  }
-                                >
-                                  Health check
-                                </button>
-                                <button
-                                  disabled={
-                                    busy ||
-                                    data.defaults[kind] === r.manifest.version
-                                  }
-                                  onClick={() =>
-                                    void act({
-                                      type: "default",
-                                      runtime: {
-                                        kind,
-                                        version: r.manifest.version,
-                                      },
-                                    })
-                                  }
-                                >
-                                  Set default
-                                </button>
-                                <button
-                                  disabled={busy}
-                                  onClick={() => {
-                                    if (
-                                      window.confirm(
-                                        "Remove runtime binaries? Referenced runtimes cannot be removed.",
-                                      )
-                                    )
-                                      void act({
-                                        type: "remove",
-                                        runtime: {
-                                          kind,
-                                          version: r.manifest.version,
-                                        },
-                                      });
-                                  }}
-                                >
-                                  Remove
-                                </button>
-                              </div>
-                            </div>
-                          ))}
-                        {!data.installed.some(
-                          (r) => r.manifest.runtime === kind,
-                        ) && (
-                          <div className="empty compact">
-                            No {kind} runtime installed. Import a native Windows
-                            x64 distribution.
-                          </div>
-                        )}
-                        <h3 className="panel-copy">Available</h3>
-                        {data.available
-                          .filter(
-                            (m) =>
-                              m.platform === data.platform &&
-                              m.runtime === kind &&
-                              !data.installed.some(
-                                (r) => r.id === kind + ":" + m.version,
-                              ),
-                          )
-                          .map((m) => (
-                            <div className="runtime-row" key={m.version}>
-                              <span>
-                                {m.version}{" "}
-                                <span className="muted">Catalog</span>
-                              </span>
-                              <button
-                                disabled={busy || !m.download || !m.sha256}
-                                onClick={() =>
-                                  void act({
-                                    type: "install",
-                                    runtime: { kind, version: m.version },
-                                  })
-                                }
-                              >
-                                Install version
-                              </button>
-                            </div>
-                          ))}
-                      </section>
-                    ))}
-                    <p className="footnote">
-                      Available versions come from bundled, local, or
-                      integrity-verified remote catalog metadata. Node uses
-                      managed site processes.
-                    </p>
-                  </>
+                  <RuntimePanel
+                    data={data}
+                    busy={busy}
+                    act={act}
+                    importRuntime={setImportKind}
+                    configure={setPhp}
+                  />
                 )}
                 {page === "Databases" && (
                   <DatabaseManager
@@ -629,20 +340,9 @@ export default function App() {
                     }}
                   />
                 )}
-                {page === "Diagnostics" && (
-                  <>
-                    <Diagnostics data={data} busy={busy} act={act} />
-                    <button
-                      onClick={() => {
-                        setLogSite(undefined);
-                        setPage("Logs");
-                      }}
-                    >
-                      Open Logs
-                    </button>
-                  </>
+                {page === "Logs" && (
+                  <Logs key={logSite?.id ?? "all"} site={logSite} />
                 )}
-                {page === "Logs" && <Logs site={logSite} />}
                 {page === "Settings" && (
                   <>
                     <button
@@ -659,7 +359,7 @@ export default function App() {
                         <h2>General</h2>
                       </div>
                       <dl>
-                        <dt>DEVONE_HOME</dt>
+                        <dt>Home</dt>
                         <dd>
                           <code>{data.home}</code>
                         </dd>
@@ -677,6 +377,10 @@ export default function App() {
                     </section>
                     <ProductSettings data={data} busy={busy} act={act} />
                     <DeveloperSettings data={data} busy={busy} act={act} />
+                    <details className="panel panel-copy">
+                      <summary>Advanced diagnostics</summary>
+                      <Diagnostics data={data} busy={busy} act={act} />
+                    </details>
                     <section className="panel">
                       <div className="panel-header">
                         <h2>Runtime catalog</h2>

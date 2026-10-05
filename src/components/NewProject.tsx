@@ -1,3 +1,5 @@
+import { ErrorNotice } from "./ErrorNotice";
+import { editorChoice, creationStage, initialVersions } from "../presentation";
 import { useState } from "react";
 import type {
   Snapshot,
@@ -19,11 +21,19 @@ export function NewProject({
 }) {
   const [name, setName] = useState("");
   const [templateId, setTemplate] = useState("static");
-  const [runtimes, setRuntimes] = useState<Record<string, string>>({
-    ...data.defaults,
-  });
+  const [runtimes, setRuntimes] = useState<Record<string, string>>(
+    initialVersions(data),
+  );
   const [tools, setTools] = useState<Record<string, string>>({
-    ...data.tool_defaults,
+    ...Object.fromEntries(
+      ["pnpm", "composer"].map((id) => [
+        id,
+        data.tool_defaults?.[id] ??
+          data.tools?.find((t) => t.id === id)?.version ??
+          data.available_tools?.find((t) => t.id === id)?.version ??
+          "",
+      ]),
+    ),
   });
   const [node, setNode] = useState(false);
   const [database, setDatabase] = useState(false);
@@ -104,26 +114,42 @@ export function NewProject({
               maxLength={63}
             />
           </label>
-          <label>
-            Template
-            <select
-              value={templateId}
-              onChange={(e) => {
-                setTemplate(e.target.value);
-                setInstall(false);
-                setMail(false);
-                setNode(false);
-                setDatabase(false);
-              }}
-            >
+          <fieldset className="template-picker">
+            <legend>Choose a template</legend>
+            <div className="template-grid">
               {data.developer?.templates.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name}
-                  {t.custom ? " · Custom code execution" : ""}
-                </option>
+                <button
+                  type="button"
+                  key={t.id}
+                  aria-pressed={templateId === t.id}
+                  disabled={!!active || busy}
+                  onClick={() => {
+                    setTemplate(t.id);
+                    setInstall(false);
+                    setMail(false);
+                    setNode(false);
+                    setDatabase(false);
+                    setRuntimes(initialVersions(data, t));
+                  }}
+                >
+                  <strong>{t.name}</strong>
+                  <small>
+                    {t.custom
+                      ? "Custom code - review before use"
+                      : t.id === "wordpress"
+                        ? "Website with a database"
+                        : t.id === "static"
+                          ? "HTML, CSS and JavaScript"
+                          : t.id === "laravel"
+                            ? "PHP application"
+                            : t.id === "blank-php"
+                              ? "Simple PHP starter"
+                              : "JavaScript / TypeScript app"}
+                  </small>
+                </button>
               ))}
-            </select>
-          </label>
+            </div>
+          </fieldset>
           {name && !valid && (
             <p role="alert">
               Use lowercase letters, digits and hyphens, without
@@ -326,7 +352,12 @@ export function NewProject({
         </div>
       </section>
       <section className="panel">
-        <h2>Creation tasks</h2>
+        <h2>Project creation</h2>
+        {!data.developer?.creation_tasks.length && (
+          <p className="panel-copy">
+            Your creation progress and results will appear here.
+          </p>
+        )}
         {[...(data.developer?.creation_tasks ?? [])]
           .sort((a, b) => b.created_at - a.created_at)
           .map((t) => (
@@ -334,18 +365,73 @@ export function NewProject({
               <div>
                 <strong>{t.project_name}</strong>
                 <p>
-                  {t.status} · {t.stage}
+                  {t.status === "completed"
+                    ? "Project ready"
+                    : t.status === "failed"
+                      ? "Could not finish"
+                      : t.status === "cancelled"
+                        ? "Cancelled"
+                        : "Creating project"}{" "}
+                  - {creationStage(t.stage)}
                 </p>
-                {t.error && <p role="alert">{t.error}</p>}
-                {t.destination && <p>Project retained at {t.destination}</p>}
+                <ErrorNotice error={t.error ?? ""} />
+                {t.destination ? (
+                  <p>
+                    {t.status === "completed"
+                      ? "Created at"
+                      : "Project folder retained at"}{" "}
+                    {t.destination}.{" "}
+                    {t.status !== "completed" &&
+                      "Open its details to recover dependencies; creation will not overwrite this folder."}
+                  </p>
+                ) : (
+                  t.status !== "running" && (
+                    <p>
+                      No project folder was committed. Review your selections
+                      before retrying.
+                    </p>
+                  )
+                )}
+                {(t.status === "failed" || t.status === "cancelled") &&
+                  !t.destination && (
+                    <button
+                      disabled={busy || !!active}
+                      onClick={() => {
+                        setName(t.project_name);
+                        setTemplate(t.template);
+                        setRuntimes(
+                          initialVersions(
+                            data,
+                            data.developer?.templates.find(
+                              (v) => v.id === t.template,
+                            ),
+                          ),
+                        );
+                        setNode(false);
+                        setDatabase(false);
+                        setInstall(false);
+                        setMail(false);
+                        setDbName("");
+                      }}
+                    >
+                      Retry setup (review selections)
+                    </button>
+                  )}
               </div>
               <div className="actions">
                 {t.status === "running" && (
                   <button
                     disabled={busy}
-                    onClick={() =>
-                      void act({ type: "cancel_creation", task_id: t.id })
-                    }
+                    onClick={() => {
+                      if (
+                        t.destination &&
+                        !window.confirm(
+                          "Cancel creation? The project folder will be kept. Dependencies or database configuration may be incomplete.",
+                        )
+                      )
+                        return;
+                      void act({ type: "cancel_creation", task_id: t.id });
+                    }}
                   >
                     Cancel creation
                   </button>
@@ -360,7 +446,7 @@ export function NewProject({
                 >
                   Logs
                 </button>
-                {t.site_id && (
+                {t.site_id && t.status !== "running" && (
                   <>
                     <button onClick={() => view(t.site_id!)}>
                       View Project
@@ -385,19 +471,19 @@ export function NewProject({
                     >
                       Open Site
                     </button>
-                    {data.developer?.default_editor && (
+                    {editorChoice(data).selected && (
                       <button
                         disabled={busy}
                         onClick={() =>
                           void act({
                             type: "editor",
                             site_id: t.site_id!,
-                            editor_id: null,
+                            editor_id: editorChoice(data).selected!.id,
                             operation: "open",
                           })
                         }
                       >
-                        Open in Editor
+                        {editorChoice(data).label}
                       </button>
                     )}
                     <button
@@ -413,7 +499,7 @@ export function NewProject({
               </div>
             </div>
           ))}
-        {error && <p role="alert">{error}</p>}
+        <ErrorNotice error={error} />
         {log && <pre className="task-log">{log}</pre>}
       </section>
     </>

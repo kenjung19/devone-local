@@ -1,3 +1,4 @@
+import { ErrorNotice } from "./ErrorNotice";
 import { useState } from "react";
 import type { Snapshot, Action } from "../contracts";
 import { bridge } from "../bridge";
@@ -56,7 +57,12 @@ export function DatabaseManager({
   return (
     <>
       <section className="panel">
-        <h2>MySQL instances</h2>
+        <h2>MySQL</h2>
+        {!installed.length && (
+          <p className="panel-copy">
+            Install MySQL from Runtimes to use local databases.
+          </p>
+        )}
         {installed.map((r) => {
           const db = data.databases.find((d) => d.runtime_id === r.id);
           const state = data.services.find((s) => s.key === r.id);
@@ -65,7 +71,12 @@ export function DatabaseManager({
               <div>
                 <strong>MySQL {r.manifest.version}</strong>
                 <p>
-                  {state?.status ?? "not initialized"} · 127.0.0.1:
+                  {!db?.initialized
+                    ? "Needs initialization"
+                    : state?.healthy
+                      ? "Running"
+                      : "Stopped"}{" "}
+                  · 127.0.0.1:
                   {db?.port ?? "not allocated"}
                 </p>
                 <small>
@@ -86,7 +97,13 @@ export function DatabaseManager({
                 ).map((operation) => (
                   <button
                     key={operation}
-                    disabled={busy}
+                    disabled={
+                      busy ||
+                      (operation === "initialize" && !!db?.initialized) ||
+                      (["start", "restart", "validate"].includes(operation) &&
+                        !db?.initialized) ||
+                      (operation === "stop" && !state?.healthy)
+                    }
                     onClick={() =>
                       void act({
                         type: "database",
@@ -139,15 +156,15 @@ export function DatabaseManager({
         <h2>Create Database</h2>
         <div className="creation-fields">
           <label>
-            MySQL runtime
+            MySQL version
             <select
               value={runtime}
               onChange={(e) => setRuntime(e.target.value)}
             >
-              <option value="">Choose a runtime</option>
+              <option value="">Choose a MySQL version</option>
               {installed.map((r) => (
                 <option key={r.id} value={r.id}>
-                  {r.id}
+                  MySQL {r.manifest.version}
                 </option>
               ))}
             </select>
@@ -173,7 +190,12 @@ export function DatabaseManager({
             password is always created. Start the selected instance first.
           </p>
           <button
-            disabled={busy || !runtime || !name}
+            disabled={
+              busy ||
+              !runtime ||
+              !name ||
+              !data.services.some((s) => s.key === runtime && s.healthy)
+            }
             onClick={() =>
               admin(runtime, name, "create", { username: user || null })
             }
@@ -183,7 +205,12 @@ export function DatabaseManager({
         </div>
       </section>
       <section className="panel">
-        <h2>DEVONE-managed databases</h2>
+        <h2>Managed databases</h2>
+        {!data.developer?.managed_databases.length && (
+          <p className="panel-copy">
+            No managed databases yet. Create one above or with a new project.
+          </p>
+        )}
         {data.developer?.managed_databases.map((b) => (
           <div
             className="runtime-row"
@@ -192,92 +219,119 @@ export function DatabaseManager({
             <div>
               <strong>{b.database_name}</strong>
               <p>
-                {b.runtime_id} · {b.status} · User {b.username}
+                MySQL {b.runtime_id.replace("mysql:", "")} · {b.status} · User{" "}
+                {b.username}
               </p>
+              <small>
+                Last backup:{" "}
+                {(() => {
+                  const last = data.developer?.backups
+                    .filter(
+                      (v) =>
+                        v.database === b.database_name &&
+                        v.runtime === b.runtime_id &&
+                        v.status === "completed",
+                    )
+                    .sort((a, b) => b.created_at - a.created_at)[0];
+                  return last
+                    ? new Date(last.created_at * 1000).toLocaleString()
+                    : "No successful backup yet";
+                })()}
+              </small>
             </div>
             <div className="actions">
               <button
-                disabled={busy}
+                disabled={
+                  busy ||
+                  !data.services.some(
+                    (s) => s.key === b.runtime_id && s.healthy,
+                  )
+                }
                 onClick={() => admin(b.runtime_id, b.database_name, "backup")}
               >
-                Backup
+                Backup Now
               </button>
-              <button
-                disabled={busy}
-                onClick={() => {
-                  setTarget({
-                    runtime: b.runtime_id,
-                    name: b.database_name,
-                    operation: "restore",
-                  });
-                  setConfirmation("");
-                  setFile("");
-                }}
-              >
-                Restore…
-              </button>
-              <button
-                disabled={busy}
-                onClick={() => {
-                  setTarget({
-                    runtime: b.runtime_id,
-                    name: b.database_name,
-                    operation: "delete",
-                  });
-                  setConfirmation("");
-                }}
-              >
-                Delete…
-              </button>
-              <button
-                disabled={busy}
-                onClick={() =>
-                  void act({
-                    type: "db_admin",
-                    runtime_id: b.runtime_id,
-                    operation: "credential",
-                    database_name: b.database_name,
-                    username: null,
-                    confirmation: null,
-                    path: null,
-                  })
-                }
-              >
-                Reveal Password
-              </button>
-              <button
-                onClick={() => {
-                  const port = data.databases.find(
-                    (d) => d.runtime_id === b.runtime_id,
-                  )?.port;
-                  void navigator.clipboard
-                    .writeText(
-                      `Host: 127.0.0.1\nPort: ${port ?? "not allocated"}\nDatabase: ${b.database_name}\nUser: ${b.username}\nPassword omitted`,
-                    )
-                    .catch((e) => setError(String(e)));
-                }}
-              >
-                Copy Connection Info
-              </button>
-              {data.developer?.editors
-                .filter((e) => e.category === "database_client")
-                .map((e) => (
-                  <button
-                    key={e.id}
-                    disabled={busy}
-                    onClick={() =>
-                      void act({
-                        type: "editor",
-                        site_id: null,
-                        editor_id: e.id,
-                        operation: "open",
-                      })
-                    }
-                  >
-                    Open in {e.name}
-                  </button>
-                ))}
             </div>
+            <details className="row-details">
+              <summary>Connection, restore and delete</summary>
+              <div className="actions">
+                <button
+                  disabled={busy}
+                  onClick={() => {
+                    setTarget({
+                      runtime: b.runtime_id,
+                      name: b.database_name,
+                      operation: "restore",
+                    });
+                    setConfirmation("");
+                    setFile("");
+                  }}
+                >
+                  Restore…
+                </button>
+                <button
+                  disabled={busy}
+                  onClick={() => {
+                    setTarget({
+                      runtime: b.runtime_id,
+                      name: b.database_name,
+                      operation: "delete",
+                    });
+                    setConfirmation("");
+                  }}
+                >
+                  Delete…
+                </button>
+                <button
+                  disabled={busy}
+                  onClick={() =>
+                    void act({
+                      type: "db_admin",
+                      runtime_id: b.runtime_id,
+                      operation: "credential",
+                      database_name: b.database_name,
+                      username: null,
+                      confirmation: null,
+                      path: null,
+                    })
+                  }
+                >
+                  Reveal Password
+                </button>
+                <button
+                  onClick={() => {
+                    const port = data.databases.find(
+                      (d) => d.runtime_id === b.runtime_id,
+                    )?.port;
+                    void navigator.clipboard
+                      .writeText(
+                        `Host: 127.0.0.1\nPort: ${port ?? "not allocated"}\nDatabase: ${b.database_name}\nUser: ${b.username}\nPassword omitted`,
+                      )
+                      .catch((e) => setError(String(e)));
+                  }}
+                >
+                  Copy Connection Info
+                </button>
+                {data.developer?.editors
+                  .filter((e) => e.category === "database_client")
+                  .map((e) => (
+                    <button
+                      key={e.id}
+                      disabled={busy}
+                      onClick={() =>
+                        void act({
+                          type: "editor",
+                          site_id: null,
+                          editor_id: e.id,
+                          operation: "open",
+                        })
+                      }
+                    >
+                      Open in {e.name}
+                    </button>
+                  ))}
+              </div>
+            </details>
           </div>
         ))}
         <p>
@@ -285,8 +339,11 @@ export function DatabaseManager({
           system databases have no destructive actions.
         </p>
         {target && (
-          <div className="confirm-panel">
-            <h3>
+          <section
+            className="confirm-panel"
+            aria-labelledby="database-confirm-title"
+          >
+            <h3 id="database-confirm-title">
               {target.operation === "delete" ? "Delete" : "Restore into"}{" "}
               {target.name}
             </h3>
@@ -299,7 +356,12 @@ export function DatabaseManager({
               <label>
                 SQL file
                 <div className="actions">
-                  <input value={file} readOnly placeholder="No file selected" />
+                  <input
+                    aria-label="Selected SQL file"
+                    value={file}
+                    readOnly
+                    placeholder="No file selected"
+                  />
                   <button disabled={busy} onClick={() => void chooseFile()}>
                     Select SQL File
                   </button>
@@ -332,12 +394,15 @@ export function DatabaseManager({
                 Confirm {target.operation}
               </button>
             </div>
-          </div>
+          </section>
         )}
-        {error && <p role="alert">{error}</p>}
+        <ErrorNotice error={error} />
       </section>
-      <section className="panel">
-        <h2>Database backups</h2>
+      <details className="panel panel-copy">
+        <summary>Backup history</summary>
+        {!data.developer?.backups.length && (
+          <p>No backups yet. Use Backup Now on a managed database.</p>
+        )}
         {data.developer?.backups.map((b) => (
           <div className="stat" key={b.id}>
             <strong>
@@ -358,7 +423,7 @@ export function DatabaseManager({
           database-specific user. No automatic source archive, scheduling or
           deletion.
         </p>
-      </section>
+      </details>
     </>
   );
 }

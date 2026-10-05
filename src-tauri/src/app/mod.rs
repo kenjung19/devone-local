@@ -304,32 +304,25 @@ impl Application {
                 "needs runtime"
             } else if caddy
                 && self.routed.get(&site.id) == Some(&site.route_identity())
-                && site.required_kinds().iter().all(|k| {
-                    if *k == "node" {
-                        site.processes
-                            .iter()
-                            .filter(|p| p.enabled && p.definition.id == "web")
-                            .all(|p| services.iter().any(|s| s.key == p.key && s.healthy))
-                    } else {
-                        site.resolved.get(*k).is_some_and(|v| {
-                            services
-                                .iter()
-                                .any(|s| s.key == format!("{k}:{v}") && s.healthy)
-                        })
-                    }
-                })
+                && site.web_components_healthy(&services)
             {
                 "running"
-            } else if site.metadata.route == crate::projects::metadata::RouteStrategy::NodeProxy {
-                match services
+            } else if site.required_services().iter().any(|key| {
+                services.iter().any(|s| {
+                    s.key == *key
+                        && matches!(
+                            s.status.as_str(),
+                            "failed" | "exited" | "restart limit reached"
+                        )
+                })
+            }) {
+                "failed"
+            } else if site.required_services().iter().any(|key| {
+                services
                     .iter()
-                    .find(|s| s.key == format!("site:{}:web", site.id))
-                    .map(|s| s.status.as_str())
-                {
-                    Some("starting") => "starting",
-                    Some("failed" | "exited" | "restart limit reached") => "failed",
-                    _ => "stopped",
-                }
+                    .any(|s| s.key == *key && s.status == "starting")
+            }) {
+                "starting"
             } else {
                 "stopped"
             }

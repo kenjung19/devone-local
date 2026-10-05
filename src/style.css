@@ -769,3 +769,150 @@ fieldset {
 .runtime-row {
   flex-wrap: wrap;
 }
+
+/* Daily-use desktop controls and compact laptop layouts. */
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible {
+  outline: 2px solid #91b2ff;
+  outline-offset: 3px;
+}
+input[type="checkbox"] {
+  width: auto;
+  margin-right: 8px;
+}
+summary {
+  cursor: pointer;
+  padding: 10px 0;
+  color: #b7c9e8;
+}
+pre {
+  overflow: auto;
+  max-width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.panel > h2,
+.panel > p,
+.panel > .creation-fields {
+  margin: 20px 22px;
+}
+.panel-buttons {
+  flex-wrap: wrap;
+}
+.site-card {
+  padding: 20px 22px;
+  border-top: 1px solid #293142;
+}
+.site-card-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+.site-title {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: 16px;
+  color: #b7ccff;
+  white-space: normal;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.site-runtimes {
+  margin: 12px 0;
+  font-size: 12px;
+}
+.site-problem {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 12px 0;
+  color: #e4c991;
+}
+.empty-actions {
+  justify-content: center;
+}
+.row-details {
+  flex-basis: 100%;
+}
+.row-details .actions {
+  margin: 10px 0;
+}
+.template-picker {
+  padding: 12px;
+  margin: 0;
+  border-color: #344052;
+}
+.template-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.template-grid button {
+  white-space: normal;
+  min-height: 86px;
+  text-align: left;
+}
+.template-grid button[aria-pressed="true"] {
+  border: 2px solid #91b2ff;
+  background: #263652;
+}
+.template-grid small {
+  font-size: 11px;
+}
+.panel-copy summary + * {
+  margin-top: 12px;
+}
+.sidebar {
+  overflow-y: auto;
+}
+@media (max-width: 1366px) {
+  .content {
+    padding: 22px;
+  }
+  .heading {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .sidebar {
+    width: 204px;
+    padding: 20px 12px;
+  }
+  main {
+    margin-left: 204px;
+  }
+  .runtime-row,
+  .settings-row {
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .panel-header {
+    flex-wrap: wrap;
+  }
+}
+@media (max-height: 800px) {
+  .setup-layout {
+    padding-top: 12px;
+  }
+  .setup-stage {
+    padding: 12px 16px;
+  }
+  .setup-stage h2 {
+    font-size: 18px;
+    margin-bottom: 8px;
+  }
+  .setup-header {
+    padding: 12px 24px;
+  }
+  .setup-home {
+    padding: 12px 0;
+  }
+  .workspace-label {
+    margin-top: 24px;
+  }
+}

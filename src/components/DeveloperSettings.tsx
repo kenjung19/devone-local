@@ -40,7 +40,7 @@ export function DeveloperSettings({
   return (
     <>
       <section className="panel">
-        <h2>Editors</h2>
+        <h2>Default Editor</h2>
         <p>
           Installed integrations are machine-local. Portable project
           configuration contains no editor paths.
@@ -71,7 +71,7 @@ export function DeveloperSettings({
             </div>
           ))}
         <details>
-          <summary>Custom editor or database client</summary>
+          <summary>Advanced: custom editor or database client</summary>
           <div className="creation-fields">
             <label>
               Name

@@ -1,3 +1,5 @@
+import { editorChoice, siteStatus, siteProblems } from "../presentation";
+import { ErrorNotice } from "./ErrorNotice";
 import { useState } from "react";
 import type { Site, Snapshot, Action, ProcessDefinition } from "../contracts";
 import { Provision } from "./Provision";
@@ -64,19 +66,36 @@ export function SiteDetail({
         ← All sites
       </button>
       <div className="actions">
-        {data.developer?.default_editor && (
+        <button
+          className="primary"
+          disabled={busy}
+          onClick={() =>
+            void act({
+              type: "site_action",
+              site_id: site.id,
+              operation: ["running", "starting"].includes(site.status)
+                ? "stop"
+                : "start",
+            })
+          }
+        >
+          {["running", "starting"].includes(site.status)
+            ? "Stop Site"
+            : "Start Site"}
+        </button>
+        {editorChoice(data).selected && (
           <button
             disabled={busy}
             onClick={() =>
               void act({
                 type: "editor",
                 site_id: site.id,
-                editor_id: null,
+                editor_id: editorChoice(data).selected!.id,
                 operation: "open",
               })
             }
           >
-            Open in Editor
+            {editorChoice(data).label}
           </button>
         )}
         {(data.developer?.editors.filter((e) => e.category === "editor")
@@ -164,25 +183,33 @@ export function SiteDetail({
           </button>
         </div>
       ))}
-      {site.metadata?.error && (
-        <div className="alert error" role="alert">
-          {site.metadata.error}
-        </div>
-      )}
+      <ErrorNotice error={site.metadata?.error ?? ""} />
+      {siteProblems(site, data)
+        .filter((p) => !p.message.includes("not installed"))
+        .map((p, i) => (
+          <div className="alert" key={i}>
+            {p.message}
+            {p.action && (
+              <button disabled={busy} onClick={() => void act(p.action!)}>
+                {p.label}
+              </button>
+            )}
+          </div>
+        ))}
       <section className="panel">
         <div className="panel-header">
           <div>
             <h2>{site.hostname}</h2>
             <p>{site.project_type.toUpperCase()}</p>
           </div>
-          <Badge value={site.status} />
+          <Badge value={siteStatus(site, data)} />
         </div>
         <dl>
           <dt>Project path</dt>
           <dd>
             <code>{site.project_path}</code>
           </dd>
-          <dt>Document root</dt>
+          <dt>Web folder</dt>
           <dd>
             <code>{site.document_root}</code>
           </dd>
@@ -191,6 +218,7 @@ export function SiteDetail({
               <dt>{kind.toUpperCase()}</dt>
               <dd>
                 <select
+                  aria-label={`${kind.toUpperCase()} version`}
                   id={`runtime-${kind}`}
                   disabled={busy}
                   value={(site.local_overrides ?? site.overrides)[kind] ?? ""}
@@ -237,7 +265,7 @@ export function SiteDetail({
               </dd>
             </div>
           ))}
-          <dt>DNS</dt>
+          <dt>Local domains</dt>
           <dd>{data.dns_ready ? "Wildcard .test ready" : "Setup required"}</dd>
           <dt>HTTPS</dt>
           <dd>
@@ -270,361 +298,372 @@ export function SiteDetail({
       {kinds.includes("mysql") && (
         <Provision site={site} data={data} busy={busy} act={act} />
       )}
-      <section className="panel">
-        <div className="panel-header">
-          <h2>Project processes</h2>
-          <button
-            disabled={busy}
-            onClick={() => {
-              setCustom(!custom);
-              setEditing(false);
-              setEnvironmentText("");
-              setDefinition({ ...definition, id: "worker", name: "Worker" });
-            }}
-          >
-            Add custom process
-          </button>
-        </div>
-        <p>
-          Processes start only after explicit Start. Saved autostart applies
-          after a process has been enabled.
-        </p>
-        {site.project_type === "node" &&
-          (site.metadata?.scripts ?? []).map((script) => (
+      <details className="panel panel-copy">
+        <summary>Advanced project processes</summary>
+        <section>
+          <div className="panel-header">
+            <h2>Project processes</h2>
             <button
-              key={script}
               disabled={busy}
-              onClick={() =>
-                void act({
-                  type: "save_process",
-                  site_id: site.id,
-                  replace: (site.processes ?? []).some(
-                    (p) => p.definition.id === "web",
-                  ),
-                  definition: {
-                    id: "web",
-                    name: "Web server",
-                    runtime: "node",
-                    executable: "pnpm",
-                    args: ["run", script],
-                    cwd: ".",
-                    env: {},
-                    port: true,
-                    autostart: true,
-                  },
-                })
-              }
+              onClick={() => {
+                setCustom(!custom);
+                setEditing(false);
+                setEnvironmentText("");
+                setDefinition({ ...definition, id: "worker", name: "Worker" });
+              }}
             >
-              Use {script} script (Local override)
+              Add custom process
             </button>
-          ))}
-        <div className="panel-buttons">
-          {(["start", "stop", "restart"] as const).map((operation) => (
-            <button
-              key={operation}
-              disabled={busy}
-              onClick={() =>
-                void act({ type: "site_action", site_id: site.id, operation })
-              }
-            >
-              {operation} site
-            </button>
-          ))}
-        </div>
-        {(["Web", "Frontend", "Workers", "Custom"] as const).map((group) => (
-          <div key={group}>
-            <h3>{group}</h3>
-            {group === "Web" && site.metadata?.route === "php_fastcgi" && (
-              <p>
-                PHP ·{" "}
-                {data.services.find((s) => s.key === `php:${site.resolved.php}`)
-                  ?.status ?? "stopped"}
-              </p>
-            )}
-            {(site.processes ?? [])
-              .filter(
-                (p) =>
-                  (p.definition.id === "web"
-                    ? "Web"
-                    : p.definition.id === "vite"
-                      ? "Frontend"
-                      : ["queue", "scheduler"].includes(p.definition.id)
-                        ? "Workers"
-                        : "Custom") === group,
-              )
-              .map((p) => {
-                const state = data.services.find((s) => s.key === p.key);
-                return (
-                  <div className="stat" key={p.key}>
-                    <strong>{p.definition.name}</strong>
-                    <code>
-                      {p.definition.executable} {p.definition.args.join(" ")}
-                    </code>
-                    <span>
-                      {state?.status ?? "stopped"} ·{" "}
-                      {p.enabled ? "enabled" : "disabled"} ·{" "}
-                      {p.definition.autostart ? "autostart" : "manual"}
-                      {state?.port ? ` · Port ${state.port}` : ""}
-                    </span>
-                    <div className="panel-buttons">
-                      {(["start", "stop", "restart"] as const).map(
-                        (operation) => (
-                          <button
-                            key={operation}
-                            disabled={busy}
-                            onClick={() =>
-                              void act({
-                                type: "site_process",
-                                site_id: site.id,
-                                process_id: p.definition.id,
-                                operation,
-                              })
-                            }
-                          >
-                            {operation}
-                          </button>
-                        ),
-                      )}
-                      <button
-                        disabled={busy}
-                        onClick={() =>
-                          void act({
-                            type: "site_process",
-                            site_id: site.id,
-                            process_id: p.definition.id,
-                            operation: p.definition.autostart
-                              ? "disable_autostart"
-                              : "enable_autostart",
-                          })
-                        }
-                      >
-                        {p.definition.autostart
-                          ? "Disable Autostart"
-                          : "Enable Autostart"}
-                      </button>
-                      <button
-                        disabled={busy || !p.enabled}
-                        onClick={() =>
-                          void act({
-                            type: "site_process",
-                            site_id: site.id,
-                            process_id: p.definition.id,
-                            operation: "disable",
-                          })
-                        }
-                      >
-                        Disable process
-                      </button>
-                      <button onClick={logs}>Logs</button>
-                      <button
-                        disabled={busy}
-                        onClick={() => {
-                          setEditing(true);
-                          setEnvironmentText(
-                            Object.entries(p.definition.env)
-                              .map(([k, v]) => `${k}=${v}`)
-                              .join("\n"),
-                          );
-                          setDefinition(p.definition);
-                          setArgumentsText(p.definition.args.join("\n"));
-                          setCustom(true);
-                        }}
-                      >
-                        Edit process
-                      </button>
-                      <button
-                        disabled={busy}
-                        onClick={() =>
-                          void act({
-                            type: "site_process",
-                            site_id: site.id,
-                            process_id: p.definition.id,
-                            operation: "remove",
-                          })
-                        }
-                      >
-                        {["web", "vite", "queue", "scheduler"].includes(
-                          p.definition.id,
-                        )
-                          ? "Reset definition"
-                          : "Remove process"}
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
           </div>
-        ))}
-        {custom && (
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              const env: Record<string, string> = {};
-              for (const line of environmentText.split("\n").filter(Boolean)) {
-                const index = line.indexOf("=");
-                const key = line.slice(0, index);
-                if (
-                  index < 1 ||
-                  !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) ||
-                  /^(PATH|PORT|HOST|PHPRC|DEVONE_HOME|DEVONE_SITE|NODE_OPTIONS|COMSPEC|PHP_INI_SCAN_DIR|COREPACK_ENABLE_NETWORK)$/i.test(
-                    key,
-                  ) ||
-                  /SECRET|TOKEN|PASSWORD|PRIVATE|KEY/i.test(key)
-                ) {
-                  setValidationError(
-                    "Invalid or reserved environment key. Portable config cannot contain secrets.",
+          <p>
+            Processes start only after explicit Start. Saved autostart applies
+            after a process has been enabled.
+          </p>
+          {site.project_type === "node" &&
+            (site.metadata?.scripts ?? []).map((script) => (
+              <button
+                key={script}
+                disabled={busy}
+                onClick={() =>
+                  void act({
+                    type: "save_process",
+                    site_id: site.id,
+                    replace: (site.processes ?? []).some(
+                      (p) => p.definition.id === "web",
+                    ),
+                    definition: {
+                      id: "web",
+                      name: "Web server",
+                      runtime: "node",
+                      executable: "pnpm",
+                      args: ["run", script],
+                      cwd: ".",
+                      env: {},
+                      port: true,
+                      autostart: true,
+                    },
+                  })
+                }
+              >
+                Use {script} script (Local override)
+              </button>
+            ))}
+          <div className="panel-buttons">
+            {(["start", "stop", "restart"] as const).map((operation) => (
+              <button
+                key={operation}
+                disabled={busy}
+                onClick={() =>
+                  void act({ type: "site_action", site_id: site.id, operation })
+                }
+              >
+                {operation} site
+              </button>
+            ))}
+          </div>
+          {(["Web", "Frontend", "Workers", "Custom"] as const).map((group) => (
+            <div key={group}>
+              <h3>{group}</h3>
+              {group === "Web" && site.metadata?.route === "php_fastcgi" && (
+                <p>
+                  PHP ·{" "}
+                  {data.services.find(
+                    (s) => s.key === `php:${site.resolved.php}`,
+                  )?.status ?? "stopped"}
+                </p>
+              )}
+              {(site.processes ?? [])
+                .filter(
+                  (p) =>
+                    (p.definition.id === "web"
+                      ? "Web"
+                      : p.definition.id === "vite"
+                        ? "Frontend"
+                        : ["queue", "scheduler"].includes(p.definition.id)
+                          ? "Workers"
+                          : "Custom") === group,
+                )
+                .map((p) => {
+                  const state = data.services.find((s) => s.key === p.key);
+                  return (
+                    <div className="stat" key={p.key}>
+                      <strong>{p.definition.name}</strong>
+                      <code>
+                        {p.definition.executable} {p.definition.args.join(" ")}
+                      </code>
+                      <span>
+                        {state?.status ?? "stopped"} ·{" "}
+                        {p.enabled ? "enabled" : "disabled"} ·{" "}
+                        {p.definition.autostart ? "autostart" : "manual"}
+                        {state?.port ? ` · Port ${state.port}` : ""}
+                      </span>
+                      <div className="panel-buttons">
+                        {(["start", "stop", "restart"] as const).map(
+                          (operation) => (
+                            <button
+                              key={operation}
+                              disabled={busy}
+                              onClick={() =>
+                                void act({
+                                  type: "site_process",
+                                  site_id: site.id,
+                                  process_id: p.definition.id,
+                                  operation,
+                                })
+                              }
+                            >
+                              {operation}
+                            </button>
+                          ),
+                        )}
+                        <button
+                          disabled={busy}
+                          onClick={() =>
+                            void act({
+                              type: "site_process",
+                              site_id: site.id,
+                              process_id: p.definition.id,
+                              operation: p.definition.autostart
+                                ? "disable_autostart"
+                                : "enable_autostart",
+                            })
+                          }
+                        >
+                          {p.definition.autostart
+                            ? "Disable Autostart"
+                            : "Enable Autostart"}
+                        </button>
+                        <button
+                          disabled={busy || !p.enabled}
+                          onClick={() =>
+                            void act({
+                              type: "site_process",
+                              site_id: site.id,
+                              process_id: p.definition.id,
+                              operation: "disable",
+                            })
+                          }
+                        >
+                          Disable process
+                        </button>
+                        <button onClick={logs}>Logs</button>
+                        <button
+                          disabled={busy}
+                          onClick={() => {
+                            setEditing(true);
+                            setEnvironmentText(
+                              Object.entries(p.definition.env)
+                                .map(([k, v]) => `${k}=${v}`)
+                                .join("\n"),
+                            );
+                            setDefinition(p.definition);
+                            setArgumentsText(p.definition.args.join("\n"));
+                            setCustom(true);
+                          }}
+                        >
+                          Edit process
+                        </button>
+                        <button
+                          disabled={busy}
+                          onClick={() =>
+                            void act({
+                              type: "site_process",
+                              site_id: site.id,
+                              process_id: p.definition.id,
+                              operation: "remove",
+                            })
+                          }
+                        >
+                          {["web", "vite", "queue", "scheduler"].includes(
+                            p.definition.id,
+                          )
+                            ? "Reset definition"
+                            : "Remove process"}
+                        </button>
+                      </div>
+                    </div>
                   );
+                })}
+            </div>
+          ))}
+          {custom && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                const env: Record<string, string> = {};
+                for (const line of environmentText
+                  .split("\n")
+                  .filter(Boolean)) {
+                  const index = line.indexOf("=");
+                  const key = line.slice(0, index);
+                  if (
+                    index < 1 ||
+                    !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) ||
+                    /^(PATH|PORT|HOST|PHPRC|DEVONE_HOME|DEVONE_SITE|NODE_OPTIONS|COMSPEC|PHP_INI_SCAN_DIR|COREPACK_ENABLE_NETWORK)$/i.test(
+                      key,
+                    ) ||
+                    /SECRET|TOKEN|PASSWORD|PRIVATE|KEY/i.test(key)
+                  ) {
+                    setValidationError(
+                      "Invalid or reserved environment key. Portable config cannot contain secrets.",
+                    );
+                    return;
+                  }
+                  env[key] = line.slice(index + 1);
+                }
+                if (
+                  !editing &&
+                  (site.processes ?? []).some(
+                    (p) => p.definition.id === definition.id,
+                  )
+                ) {
+                  setValidationError("Process ID already exists. Use Edit.");
                   return;
                 }
-                env[key] = line.slice(index + 1);
-              }
-              if (
-                !editing &&
-                (site.processes ?? []).some(
-                  (p) => p.definition.id === definition.id,
-                )
-              ) {
-                setValidationError("Process ID already exists. Use Edit.");
-                return;
-              }
-              setValidationError("");
-              void act({
-                type: "save_process",
-                replace: editing,
-                site_id: site.id,
-                definition: {
-                  ...definition,
-                  env,
-                  args: argumentsText.split("\n").filter((a) => a.length > 0),
-                },
-              });
-            }}
-          >
-            <label>
-              Process ID
-              <input
-                required
-                disabled={editing}
-                value={definition.id}
-                onChange={(e) =>
-                  setDefinition({ ...definition, id: e.target.value })
-                }
-              />
-            </label>
-            <label>
-              Name
-              <input
-                required
-                value={definition.name}
-                onChange={(e) =>
-                  setDefinition({ ...definition, name: e.target.value })
-                }
-              />
-            </label>
-            <label>
-              Managed executable
-              <select
-                value={definition.executable}
-                onChange={(e) =>
-                  setDefinition({
+                setValidationError("");
+                void act({
+                  type: "save_process",
+                  replace: editing,
+                  site_id: site.id,
+                  definition: {
                     ...definition,
-                    executable: e.target.value,
-                    runtime: ["php", "composer"].includes(e.target.value)
-                      ? "php"
-                      : "node",
-                  })
-                }
-              >
-                {["node", "pnpm", "php", "composer"].map((executable) => (
-                  <option key={executable}>{executable}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Arguments (one argument per line)
-              <textarea
-                rows={4}
-                value={argumentsText}
-                onChange={(e) => setArgumentsText(e.target.value)}
-              />
-            </label>
-            <label>
-              Working directory (relative to project)
-              <input
-                required
-                value={definition.cwd}
-                onChange={(e) =>
-                  setDefinition({ ...definition, cwd: e.target.value })
-                }
-              />
-            </label>
-            <label>
-              <input
-                type="checkbox"
-                checked={definition.port}
-                onChange={(e) =>
-                  setDefinition({ ...definition, port: e.target.checked })
-                }
-              />
-              Reserve a managed port and require an owned listener
-            </label>
-            <label>
-              Health strategy
-              <select
-                value={definition.health ?? ""}
-                onChange={(e) =>
-                  setDefinition({
-                    ...definition,
-                    health: (e.target.value ||
-                      null) as ProcessDefinition["health"],
-                  })
-                }
-              >
-                <option value="">
-                  Automatic (HTTP for port, alive for worker)
-                </option>
-                <option value="process_alive">Process alive</option>
-                <option value="tcp_listener">Owned TCP listener</option>
-                <option value="http">HTTP response</option>
-              </select>
-            </label>
-            <label>
-              <input
-                type="checkbox"
-                checked={definition.autostart}
-                onChange={(e) =>
-                  setDefinition({ ...definition, autostart: e.target.checked })
-                }
-              />
-              Autostart after explicit first Start
-            </label>
-            <label>
-              Environment (machine-local, KEY=value per line)
-              <textarea
-                rows={3}
-                value={environmentText}
-                onChange={(e) => setEnvironmentText(e.target.value)}
-              />
-            </label>
-            {validationError && (
-              <p role="alert" className="alert error">
-                {validationError}
+                    env,
+                    args: argumentsText.split("\n").filter((a) => a.length > 0),
+                  },
+                });
+              }}
+            >
+              <label>
+                Process ID
+                <input
+                  required
+                  disabled={editing}
+                  value={definition.id}
+                  onChange={(e) =>
+                    setDefinition({ ...definition, id: e.target.value })
+                  }
+                />
+              </label>
+              <label>
+                Name
+                <input
+                  required
+                  value={definition.name}
+                  onChange={(e) =>
+                    setDefinition({ ...definition, name: e.target.value })
+                  }
+                />
+              </label>
+              <label>
+                Managed executable
+                <select
+                  value={definition.executable}
+                  onChange={(e) =>
+                    setDefinition({
+                      ...definition,
+                      executable: e.target.value,
+                      runtime: ["php", "composer"].includes(e.target.value)
+                        ? "php"
+                        : "node",
+                    })
+                  }
+                >
+                  {["node", "pnpm", "php", "composer"].map((executable) => (
+                    <option key={executable}>{executable}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Arguments (one argument per line)
+                <textarea
+                  rows={4}
+                  value={argumentsText}
+                  onChange={(e) => setArgumentsText(e.target.value)}
+                />
+              </label>
+              <label>
+                Working directory (relative to project)
+                <input
+                  required
+                  value={definition.cwd}
+                  onChange={(e) =>
+                    setDefinition({ ...definition, cwd: e.target.value })
+                  }
+                />
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={definition.port}
+                  onChange={(e) =>
+                    setDefinition({ ...definition, port: e.target.checked })
+                  }
+                />
+                Reserve a managed port and require an owned listener
+              </label>
+              <label>
+                Health strategy
+                <select
+                  value={definition.health ?? ""}
+                  onChange={(e) =>
+                    setDefinition({
+                      ...definition,
+                      health: (e.target.value ||
+                        null) as ProcessDefinition["health"],
+                    })
+                  }
+                >
+                  <option value="">
+                    Automatic (HTTP for port, alive for worker)
+                  </option>
+                  <option value="process_alive">Process alive</option>
+                  <option value="tcp_listener">Owned TCP listener</option>
+                  <option value="http">HTTP response</option>
+                </select>
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={definition.autostart}
+                  onChange={(e) =>
+                    setDefinition({
+                      ...definition,
+                      autostart: e.target.checked,
+                    })
+                  }
+                />
+                Autostart after explicit first Start
+              </label>
+              <label>
+                Environment (machine-local, KEY=value per line)
+                <textarea
+                  rows={3}
+                  value={environmentText}
+                  onChange={(e) => setEnvironmentText(e.target.value)}
+                />
+              </label>
+              {validationError && (
+                <p role="alert" className="alert error">
+                  {validationError}
+                </p>
+              )}
+              <p>
+                Save creates a Local override. Runtime, tool and working
+                directory are validated before saving.
               </p>
-            )}
-            <p>
-              Save creates a Local override. Runtime, tool and working directory
-              are validated before saving.
-            </p>
-            <button disabled={busy}>Save disabled process</button>
-          </form>
-        )}
-        <button
-          disabled={busy}
-          onClick={() => void act({ type: "save_portable", site_id: site.id })}
-        >
-          Save portable config (.devone.json)
-        </button>
-      </section>
+              <button disabled={busy}>Save disabled process</button>
+            </form>
+          )}
+          <button
+            disabled={busy}
+            onClick={() =>
+              void act({ type: "save_portable", site_id: site.id })
+            }
+          >
+            Save portable config (.devone.json)
+          </button>
+        </section>
+      </details>
       {(site.metadata?.package_manager ||
         kinds.includes("node") ||
         site.project_type === "laravel" ||
@@ -776,7 +815,7 @@ export function SiteDetail({
             ))}
         </section>
       )}
-      {site.issue && <div className="alert error">{site.issue}</div>}
+      <ErrorNotice error={site.issue ?? ""} />
       <p className="footnote">
         Overrides are persisted independently of global defaults. Terminal PATH
         applies only to the new terminal session.

@@ -23,3 +23,5 @@ pub mod webserver;
 pub mod setup;
 
 pub mod phase3;
+
+pub mod desktop_smoke;

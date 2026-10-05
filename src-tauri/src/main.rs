@@ -19,10 +19,13 @@ fn main() {
 fn run() -> devone::core::Result<()> {
     let mut home = Home::resolve()?;
     let mut startup = false;
+    let mut smoke = false;
+    let mut explicit_home = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--startup" => startup = true,
+            "--smoke-test" => smoke = true,
             "--home" => {
                 let value = args
                     .next()
@@ -32,15 +35,23 @@ fn run() -> devone::core::Result<()> {
                     return devone::core::fail("Home path must be absolute");
                 }
                 home = Home::new(path);
+                explicit_home = true;
             }
             _ => return devone::core::fail("Unsupported desktop argument"),
         }
+    }
+    if smoke && !explicit_home {
+        return devone::core::fail("Smoke mode requires an explicit disposable --home path");
     }
     home.ensure()?;
     let instance = match devone::desktop_instance::DesktopInstance::claim(&home)? {
         devone::desktop_instance::Launch::Activated => return Ok(()),
         devone::desktop_instance::Launch::Primary(instance) => Arc::new(instance),
     };
+    if smoke && (home.path("devone.db").exists() || std::fs::read_dir(home.www())?.next().is_some())
+    {
+        return devone::core::fail("Smoke mode requires a new empty disposable Home");
+    }
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -50,9 +61,22 @@ fn run() -> devone::core::Result<()> {
         .with_env_filter("devone=info")
         .with_writer(Mutex::new(log))
         .try_init();
-    let app: Shared = Arc::new(Mutex::new(Application::open(home.clone())?));
+    let app: Shared = Arc::new(Mutex::new(if smoke {
+        Application::open_with_options(
+            home.clone(),
+            devone::app::Options {
+                system_setup: false,
+                autostart: false,
+            },
+        )?
+    } else {
+        Application::open(home.clone())?
+    }));
     let state = app.clone();
     let mut watcher = Some(devone::app::watcher::watch(app.clone())?);
+    if smoke {
+        return devone::desktop_smoke::run(&home, app, watcher.take().unwrap());
+    }
     let quitting = Arc::new(AtomicBool::new(false));
     let finished = Arc::new(AtomicBool::new(false));
     let setup_state = app.clone();

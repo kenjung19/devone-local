@@ -21,8 +21,9 @@ export function ToolManager({
             versions
           </h2>
           <p>
-            Managed default: {data.tool_defaults?.[id] ?? "not configured"}. A
-            project-declared pnpm version takes precedence.
+            {id === "mailpit"
+              ? `Local mail service - ${data.developer?.mail.running ? "Running" : "Stopped"}`
+              : `CLI tool - Default: ${data.tool_defaults?.[id] ?? "not configured"}`}
           </p>
           {[
             ...new Map(
@@ -47,33 +48,43 @@ export function ToolManager({
                   </strong>
                   <span>
                     {installed ? "Installed" : "Available"}
-                    {data.tool_defaults?.[id] === t.version ? " · Default" : ""}
+                    {id !== "mailpit" && data.tool_defaults?.[id] === t.version
+                      ? " · Default"
+                      : ""}
                   </span>
                   <div className="panel-buttons">
                     {installed ? (
                       <>
                         {(["default", "validate", "remove"] as const).map(
-                          (operation) => (
-                            <button
-                              key={operation}
-                              disabled={busy}
-                              onClick={() =>
-                                void act({
-                                  type: "tool_action",
-                                  id,
-                                  version: t.version,
-                                  operation,
-                                  runtime_version: runtime,
-                                })
-                              }
-                            >
-                              {operation === "default"
-                                ? "Set default"
-                                : operation === "validate"
-                                  ? "Validate"
-                                  : "Remove"}
-                            </button>
-                          ),
+                          (operation) =>
+                            !(id === "mailpit" && operation === "default") && (
+                              <button
+                                key={operation}
+                                disabled={busy}
+                                onClick={() => {
+                                  if (
+                                    operation === "remove" &&
+                                    !window.confirm(
+                                      `Remove ${id} ${t.version}? Project files and mail data are kept.`,
+                                    )
+                                  )
+                                    return;
+                                  void act({
+                                    type: "tool_action",
+                                    id,
+                                    version: t.version,
+                                    operation,
+                                    runtime_version: runtime,
+                                  });
+                                }}
+                              >
+                                {operation === "default"
+                                  ? "Set default"
+                                  : operation === "validate"
+                                    ? "Validate"
+                                    : "Remove"}
+                              </button>
+                            ),
                         )}
                       </>
                     ) : (
@@ -108,19 +119,27 @@ export function ToolManager({
                   disabled={
                     busy ||
                     !data.developer?.mail.installed ||
+                    (operation === "start" && data.developer?.mail.running) ||
+                    (operation === "stop" && !data.developer?.mail.running) ||
                     (operation === "open" && !data.developer?.mail.running)
                   }
                   onClick={() => void act({ type: "mail", operation })}
                 >
-                  {operation === "open" ? "Open Mailbox" : operation}
+                  {operation === "open"
+                    ? "Open Mailbox"
+                    : operation === "start"
+                      ? "Start"
+                      : "Stop"}
                 </button>
               ))}
             </div>
           )}
           <p>
-            {id === "composer"
-              ? "Composer validation and project commands use selected managed PHP."
-              : "No global pnpm is required. Missing declared versions are never substituted."}
+            {id === "mailpit"
+              ? "Capture development email locally. Existing project mail settings are kept."
+              : id === "composer"
+                ? "Composer validation and project commands use selected managed PHP."
+                : "No global pnpm is required. Missing declared versions are never substituted."}
           </p>
         </section>
       ))}
