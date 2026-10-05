@@ -10,9 +10,16 @@ export function ToolManager({
 }) {
   return (
     <>
-      {(["pnpm", "composer"] as const).map((id) => (
+      {(["pnpm", "composer", "mailpit"] as const).map((id) => (
         <section className="panel" key={id}>
-          <h2>{id === "pnpm" ? "pnpm" : "Composer"} versions</h2>
+          <h2>
+            {id === "pnpm"
+              ? "pnpm"
+              : id === "mailpit"
+                ? "Mailpit (service tool)"
+                : "Composer"}{" "}
+            versions
+          </h2>
           <p>
             Managed default: {data.tool_defaults?.[id] ?? "not configured"}. A
             project-declared pnpm version takes precedence.
@@ -30,7 +37,9 @@ export function ToolManager({
                 (v) => v.id === id && v.version === t.version,
               );
               const runtime =
-                data.defaults[id === "pnpm" ? "node" : "php"] ?? null;
+                id === "mailpit"
+                  ? ""
+                  : (data.defaults[id === "pnpm" ? "node" : "php"] ?? null);
               return (
                 <div className="stat" key={`${id}:${t.version}`}>
                   <strong>
@@ -69,7 +78,7 @@ export function ToolManager({
                       </>
                     ) : (
                       <button
-                        disabled={busy || !runtime}
+                        disabled={busy || (id !== "mailpit" && !runtime)}
                         onClick={() =>
                           void act({
                             type: "install_tool",
@@ -86,6 +95,28 @@ export function ToolManager({
                 </div>
               );
             })}
+          {id === "mailpit" && (
+            <div className="panel-buttons">
+              <p>
+                Optional loopback-only mail service. SMTP{" "}
+                {data.developer?.mail.smtp_port ?? "not allocated"} · Mailbox{" "}
+                {data.developer?.mail.web_port ?? "not allocated"}
+              </p>
+              {(["start", "stop", "open"] as const).map((operation) => (
+                <button
+                  key={operation}
+                  disabled={
+                    busy ||
+                    !data.developer?.mail.installed ||
+                    (operation === "open" && !data.developer?.mail.running)
+                  }
+                  onClick={() => void act({ type: "mail", operation })}
+                >
+                  {operation === "open" ? "Open Mailbox" : operation}
+                </button>
+              ))}
+            </div>
+          )}
           <p>
             {id === "composer"
               ? "Composer validation and project commands use selected managed PHP."

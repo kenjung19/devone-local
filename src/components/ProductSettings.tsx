@@ -14,7 +14,7 @@ export function ProductSettings({
     <>
       <section className="panel">
         <div className="panel-header">
-          <h2>Desktop & startup</h2>
+          <h2>Startup</h2>
         </div>
         <div className="settings-row">
           <label>
@@ -69,7 +69,7 @@ export function ProductSettings({
       </section>
       <section className="panel">
         <div className="panel-header">
-          <h2>Wildcard .test DNS</h2>
+          <h2>Local Domains</h2>
         </div>
         <dl>
           <dt>Policy</dt>
@@ -104,7 +104,7 @@ export function ProductSettings({
       </section>
       <section className="panel">
         <div className="panel-header">
-          <h2>Local CA</h2>
+          <h2>HTTPS</h2>
         </div>
         <dl>
           <dt>CA</dt>

@@ -728,3 +728,44 @@ fieldset {
 .setup-intro .eyebrow {
   display: none;
 }
+
+.creation-fields {
+  display: grid;
+  gap: 16px;
+  max-width: 700px;
+  margin: 20px 0;
+}
+.creation-fields label {
+  display: grid;
+  gap: 7px;
+}
+.creation-fields label:has(input[type="checkbox"]) {
+  display: block;
+}
+.creation-fields input:not([type="checkbox"]),
+.creation-fields select,
+.confirm-panel input {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--border, #d5d9e0);
+  border-radius: 6px;
+}
+.confirm-panel {
+  padding: 20px;
+  border: 1px solid #dc7d65;
+  border-radius: 8px;
+  margin: 20px 0;
+}
+.task-log {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 480px;
+  overflow: auto;
+  padding: 16px;
+  background: #17202b;
+  color: #dce5f0;
+  border-radius: 8px;
+}
+.runtime-row {
+  flex-wrap: wrap;
+}

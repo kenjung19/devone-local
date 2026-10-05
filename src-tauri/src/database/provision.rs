@@ -37,7 +37,7 @@ pub fn valid_name(name: &str) -> bool {
         && name.len() <= 63
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
-fn connection(port: u16, user: &str, password: &str) -> Result<Conn> {
+pub(super) fn connection(port: u16, user: &str, password: &str) -> Result<Conn> {
     let options = OptsBuilder::new()
         .ip_or_hostname(Some("127.0.0.1"))
         .tcp_port(port)

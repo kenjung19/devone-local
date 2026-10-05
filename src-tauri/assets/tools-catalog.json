@@ -38,5 +38,13 @@
     "url": "https://getcomposer.org/download/2.2.26/composer.phar",
     "sha256": "2f889b1d19666af6081448a526539f73b1d95d10f745536afd8132acb13743f3",
     "entry": "composer.phar"
+  },
+  {
+    "id": "mailpit",
+    "version": "1.31.3",
+    "url": "https://github.com/axllent/mailpit/releases/download/v1.31.3/mailpit-windows-amd64.zip",
+    "sha256": "863e9502d4e0f14a78c0f91c5091797b1c7b7b7e3fc7e5eab62e5770ce44b76e",
+    "entry": "mailpit.exe",
+    "platform": "windows-x64"
   }
 ]

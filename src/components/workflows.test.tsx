@@ -1,3 +1,6 @@
+import { NewProject } from "./NewProject";
+import { DatabaseManager } from "./DatabaseManager";
+import { DeveloperSettings } from "./DeveloperSettings";
 import { ToolManager } from "./ToolManager";
 import { describe, it, expect } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -360,5 +363,112 @@ describe("Portable config errors", () => {
     expect(html).not.toContain("runtime-php");
     expect(html).not.toContain("runtime-node");
     expect(html).not.toContain("runtime-mysql");
+  });
+});
+
+describe("Phase 3 workflows", () => {
+  const developer: NonNullable<Snapshot["developer"]> = {
+    templates: [
+      {
+        id: "static",
+        name: "Static HTML",
+        category: "Static",
+        strategy: "static",
+        version: "",
+        runtimes: {},
+        tools: [],
+        custom: false,
+      },
+    ],
+    template_error: null,
+    creation_tasks: [],
+    editors: [],
+    default_editor: null,
+    preferences: {},
+    managed_databases: [],
+    backups: [],
+    mail: { installed: false, running: false, smtp_port: null, web_port: null },
+    database_catalog: {},
+    backup_preferences: { automatic: false, keep_last: 7 },
+    diagnostic_report: null,
+  };
+  it("shows Static creation without irrelevant runtime or database fields", () => {
+    const html = renderToStaticMarkup(
+      <NewProject
+        data={{ ...data, developer }}
+        busy={false}
+        act={async () => {}}
+        view={() => {}}
+      />,
+    );
+    expect(html).toContain("New Project");
+    expect(html).toContain("Static HTML");
+    expect(html).not.toContain("minimum");
+    expect(html).not.toContain("Database name");
+    expect(html).not.toContain("selected php");
+    expect(html).not.toContain("selected node");
+  });
+  it("keeps system and external databases read-only", () => {
+    const html = renderToStaticMarkup(
+      <DatabaseManager
+        data={{
+          ...data,
+          developer: {
+            ...developer,
+            database_catalog: {
+              "mysql:8.4.11": [
+                { name: "mysql", system: true, managed: false },
+                { name: "external", system: false, managed: false },
+              ],
+            },
+          },
+          installed: [
+            {
+              ...php,
+              id: "mysql:8.4.11",
+              manifest: {
+                ...php.manifest,
+                runtime: "mysql",
+                version: "8.4.11",
+              },
+            },
+          ],
+        }}
+        busy={false}
+        act={async () => {}}
+        logs={() => {}}
+      />,
+    );
+    expect(html).toContain("System databases");
+    expect(html).toContain("External · read only");
+    expect(html).not.toContain("Delete…");
+    expect(html).not.toContain("Confirm delete");
+  });
+  it("shows only installed editors and separates local paths from portable intent", () => {
+    const html = renderToStaticMarkup(
+      <DeveloperSettings
+        data={{
+          ...data,
+          developer: {
+            ...developer,
+            editors: [
+              {
+                id: "custom-editor",
+                name: "Installed Editor",
+                executable: "C:/Editor/editor.exe",
+                args: ["{project}"],
+                category: "editor",
+              },
+            ],
+          },
+        }}
+        busy={false}
+        act={async () => {}}
+      />,
+    );
+    expect(html).toContain("Installed Editor");
+    expect(html).toContain("machine-local");
+    expect(html).not.toContain("Open in Cursor");
+    expect(html).toContain("Automatic scheduling and deletion are not enabled");
   });
 });

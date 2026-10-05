@@ -53,6 +53,7 @@ export interface Database {
   port: number | null;
 }
 export interface Snapshot {
+  developer?: Developer;
   tool_defaults?: Record<string, string>;
   dependency_tasks?: DependencyTask[];
   tools?: Tool[];
@@ -109,6 +110,39 @@ export interface InstallProgress {
   error: string | null;
 }
 export type Action =
+  | { type: "create_project"; request: CreateRequest }
+  | { type: "cancel_creation"; task_id: string }
+  | { type: "save_editor"; editor: Editor }
+  | {
+      type: "editor";
+      site_id: string | null;
+      editor_id: string | null;
+      operation: "open" | "default";
+    }
+  | {
+      type: "site_preference";
+      site_id: string;
+      operation: "favorite" | "unfavorite" | "opened";
+    }
+  | { type: "mail"; operation: "start" | "stop" | "open" }
+  | { type: "diagnostics"; export: boolean }
+  | { type: "backup_preferences"; keep_last: number }
+  | {
+      type: "db_admin";
+      runtime_id: string;
+      operation:
+        | "list"
+        | "create"
+        | "delete"
+        | "backup"
+        | "restore"
+        | "connection"
+        | "credential";
+      database_name: string;
+      username: string | null;
+      confirmation: string | null;
+      path: string | null;
+    }
   | {
       type: "site_action";
       site_id: string;
@@ -243,4 +277,87 @@ export interface DependencyTask {
   status: string;
   log: string;
   error: string | null;
+}
+
+export interface Template {
+  id: string;
+  name: string;
+  category: string;
+  strategy: string;
+  version: string;
+  runtimes: Record<string, string>;
+  tools: string[];
+  custom: boolean;
+}
+export interface CreateRequest {
+  name: string;
+  template: string;
+  runtimes: Record<string, string>;
+  tools: Record<string, string>;
+  install_dependencies: boolean;
+  database_name: string | null;
+  configure_mail: boolean;
+}
+export interface CreationTask {
+  id: string;
+  template: string;
+  project_name: string;
+  status: string;
+  stage: string;
+  log: string;
+  error: string | null;
+  site_id: string | null;
+  destination: string | null;
+  created_at: number;
+}
+export interface Editor {
+  id: string;
+  name: string;
+  executable: string;
+  args: string[];
+  category: "editor" | "database_client";
+}
+export interface ManagedDatabase {
+  runtime_id: string;
+  database_name: string;
+  username: string;
+  credential_ref: string;
+  site_id: string | null;
+  status: string;
+}
+export interface Backup {
+  id: string;
+  type: string;
+  database: string;
+  runtime: string;
+  path: string;
+  size: number;
+  sha256: string;
+  created_at: number;
+  status: string;
+}
+export interface Developer {
+  templates: Template[];
+  template_error: string | null;
+  creation_tasks: CreationTask[];
+  editors: Editor[];
+  default_editor: string | null;
+  preferences: Record<
+    string,
+    { favorite: boolean; opened_at: number; created_at: number }
+  >;
+  managed_databases: ManagedDatabase[];
+  backups: Backup[];
+  mail: {
+    installed: boolean;
+    running: boolean;
+    smtp_port: number | null;
+    web_port: number | null;
+  };
+  database_catalog: Record<
+    string,
+    { name: string; system: boolean; managed: boolean }[]
+  >;
+  backup_preferences: { automatic: boolean; keep_last: number };
+  diagnostic_report: string | null;
 }

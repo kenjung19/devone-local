@@ -283,6 +283,8 @@ pub fn install(
             if actual.trim() != t.version {
                 return crate::core::fail("Managed pnpm version mismatch");
             }
+        } else if id == "mailpit" {
+            crate::phase3::files::extract(data, &staging)?;
         } else {
             std::fs::write(staging.join("composer.phar"), data)?;
         }
@@ -304,6 +306,17 @@ pub fn install(
                     pnpm_policy(&t.version)
                 ),
             )?;
+        } else if id == "mailpit" {
+            let output = crate::process::run_checked(
+                &staging.join(&t.entry),
+                &["version".into(), "--no-release-check".into()],
+                &staging,
+                &BTreeMap::new(),
+                Duration::from_secs(15),
+            )?;
+            if !output.contains(&t.version) {
+                return crate::core::fail("Mailpit version mismatch");
+            }
         } else {
             let php = node
                 .map(str::to_owned)
@@ -535,6 +548,19 @@ pub fn validate(
     runtime_version: &str,
 ) -> Result<String> {
     let tool = find(store, home, id, Some(version))?;
+    if id == "mailpit" {
+        let output = crate::process::run_checked(
+            &tool,
+            &["version".into(), "--no-release-check".into()],
+            tool.parent().unwrap(),
+            &BTreeMap::new(),
+            std::time::Duration::from_secs(15),
+        )?;
+        if !output.contains(version) {
+            return crate::core::fail("Mailpit version mismatch");
+        }
+        return Ok(output);
+    }
     let runtime = runtime::find(
         store,
         &RuntimeRef {

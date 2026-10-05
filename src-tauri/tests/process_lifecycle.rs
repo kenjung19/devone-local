@@ -333,3 +333,80 @@ fn process_alive_health_does_not_admit_an_immediate_worker_failure() {
     assert!(!supervisor.states(&store).unwrap()[0].healthy);
     supervisor.stop_all(&store).unwrap();
 }
+
+#[test]
+fn project_creation_cancellation_terminates_owned_generator_and_preserves_unrelated() {
+    use devone::{config::Home, phase3::templates};
+    let d = tempfile::tempdir().unwrap();
+    let home = Home::new(d.path());
+    home.ensure().unwrap();
+    let store = Store::open(&home.path("devone.db")).unwrap();
+    let runtime = home.runtime("node", "24.21.0");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::copy(fixture(), runtime.join("node.exe")).unwrap();
+    let manifest = devone::catalog::RuntimeManifest {
+        runtime: devone::core::RuntimeType::Node,
+        version: "24.21.0".into(),
+        platform: devone::platform::platform_key(),
+        binaries: std::collections::BTreeMap::from([("cli".into(), "node.exe".into())]),
+        download: None,
+        sha256: None,
+        metadata: Default::default(),
+    };
+    store.conn.execute("INSERT INTO runtime_installations VALUES('node:24.21.0','node','24.21.0',?1,'runtimes/node/24.21.0',0)",[serde_json::to_string(&manifest).unwrap()]).unwrap();
+    std::fs::create_dir_all(home.path("config/templates")).unwrap();
+    let template = serde_json::json!({"id":"custom-slow","name":"Slow","category":"Node","strategy":"custom","runtimes":{"node":"24.0.0"},"tools":[],"files":{"index.html":"owned"},"commands":[{"id":"create","name":"Generator","runtime":"node","executable":"node","args":["sleep"],"cwd":".","env":{},"port":false,"autostart":false}]});
+    std::fs::write(
+        home.path("config/templates/slow.json"),
+        template.to_string(),
+    )
+    .unwrap();
+    let unrelated = home.www().join("unrelated");
+    std::fs::create_dir(&unrelated).unwrap();
+    std::fs::write(unrelated.join("keep"), "user").unwrap();
+    let request = templates::Request {
+        name: "cancelled-project".into(),
+        template: "custom-slow".into(),
+        runtimes: std::collections::BTreeMap::from([("node".into(), "24.21.0".into())]),
+        tools: Default::default(),
+        install_dependencies: false,
+        database_name: None,
+        configure_mail: false,
+    };
+    let id = templates::start(&store, &home, request, None, None).unwrap();
+    let end = Instant::now() + Duration::from_secs(5);
+    loop {
+        let t = templates::list(&home)
+            .into_iter()
+            .find(|t| t.id == id)
+            .unwrap();
+        if std::fs::read_to_string(&t.log)
+            .unwrap_or_default()
+            .contains("Execute managed node")
+        {
+            break;
+        }
+        assert!(Instant::now() < end);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    templates::cancel(&home, &id).unwrap();
+    let end = Instant::now() + Duration::from_secs(5);
+    loop {
+        let t = templates::list(&home)
+            .into_iter()
+            .find(|t| t.id == id)
+            .unwrap();
+        if t.status != "running" {
+            assert_eq!(t.status, "cancelled");
+            break;
+        }
+        assert!(Instant::now() < end);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!home.www().join("cancelled-project").exists());
+    assert!(!home.path("cache/project-staging").join(id).exists());
+    assert_eq!(
+        std::fs::read_to_string(unrelated.join("keep")).unwrap(),
+        "user"
+    );
+}

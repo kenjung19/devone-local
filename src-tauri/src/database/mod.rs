@@ -227,3 +227,5 @@ mod tests {
         assert_eq!(std::fs::read(data.join("user-data")).unwrap(), b"preserve");
     }
 }
+
+pub mod admin;

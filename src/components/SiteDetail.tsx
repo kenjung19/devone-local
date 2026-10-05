@@ -63,6 +63,73 @@ export function SiteDetail({
       <button className="back" onClick={back}>
         ← All sites
       </button>
+      <div className="actions">
+        {data.developer?.default_editor && (
+          <button
+            disabled={busy}
+            onClick={() =>
+              void act({
+                type: "editor",
+                site_id: site.id,
+                editor_id: null,
+                operation: "open",
+              })
+            }
+          >
+            Open in Editor
+          </button>
+        )}
+        {(data.developer?.editors.filter((e) => e.category === "editor")
+          .length ?? 0) > 1 && (
+          <details>
+            <summary>Open in…</summary>
+            {data.developer?.editors
+              .filter((e) => e.category === "editor")
+              .map((e) => (
+                <button
+                  key={e.id}
+                  disabled={busy}
+                  onClick={() =>
+                    void act({
+                      type: "editor",
+                      site_id: site.id,
+                      editor_id: e.id,
+                      operation: "open",
+                    })
+                  }
+                >
+                  {e.name}
+                </button>
+              ))}
+          </details>
+        )}
+        <button
+          disabled={busy}
+          onClick={() =>
+            void act({
+              type: "site_preference",
+              site_id: site.id,
+              operation: data.developer?.preferences[site.id]?.favorite
+                ? "unfavorite"
+                : "favorite",
+            })
+          }
+        >
+          {data.developer?.preferences[site.id]?.favorite
+            ? "Unpin"
+            : "Pin Site"}
+        </button>
+      </div>
+      {data.developer?.mail.running &&
+        ["php", "laravel", "wordpress", "plain_php"].includes(
+          site.project_type,
+        ) && (
+          <section className="panel">
+            <h2>Local mail suggestion</h2>
+            <p>Suggested values only; existing project files are not edited.</p>
+            <pre>{`MAIL_MAILER=smtp\nMAIL_HOST=127.0.0.1\nMAIL_PORT=${data.developer.mail.smtp_port}`}</pre>
+          </section>
+        )}
       {missing.map(({ kind, version }) => (
         <div className="alert error" role="alert" key={kind}>
           <strong>

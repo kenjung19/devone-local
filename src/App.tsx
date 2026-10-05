@@ -1,3 +1,7 @@
+import { NewProject } from "./components/NewProject";
+import { DatabaseManager } from "./components/DatabaseManager";
+import { DeveloperSettings, Diagnostics } from "./components/DeveloperSettings";
+import { listen } from "@tauri-apps/api/event";
 import { ToolManager } from "./components/ToolManager";
 import { Badge } from "./components/Badge";
 import { Stat, SiteDetail } from "./components/SiteDetail";
@@ -10,13 +14,23 @@ import { useCallback, useEffect, useState } from "react";
 import { bridge, desktop } from "./bridge";
 import type { Action, Snapshot, RuntimeKind, Installation } from "./contracts";
 import { bindingLabel, availableSiteCount } from "./presentation";
-type Page = "Sites" | "Runtimes" | "Tools" | "Databases" | "Logs" | "Settings";
+type Page =
+  | "New Project"
+  | "Diagnostics"
+  | "Sites"
+  | "Runtimes"
+  | "Tools"
+  | "Databases"
+  | "Logs"
+  | "Settings";
 const pages: Page[] = [
   "Sites",
+  "New Project",
   "Runtimes",
   "Tools",
   "Databases",
   "Logs",
+  "Diagnostics",
   "Settings",
 ];
 const kinds: RuntimeKind[] = ["php", "mysql", "node", "caddy"];
@@ -37,6 +51,17 @@ export default function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const [importKind, setImportKind] = useState<RuntimeKind | null>(null);
   const [php, setPhp] = useState<Installation | null>(null);
+  useEffect(() => {
+    if (!desktop) return;
+    const subscription = listen("devone-new-project", () => {
+      setPage("New Project");
+      setSelected(null);
+      setSetupDismissed(true);
+    });
+    return () => {
+      void subscription.then((unlisten) => unlisten());
+    };
+  }, []);
   const refresh = useCallback(async () => {
     if (desktop) {
       try {
@@ -134,8 +159,19 @@ export default function App() {
                 setSelected(null);
               }}
             >
-              <span className="nav-icon">
-                {["◫", "◇", "⚒", "▤", "≡", "⚙"][i]}
+              <span className="nav-icon" aria-hidden="true">
+                {
+                  [
+                    "\u25eb",
+                    "+",
+                    "\u25c7",
+                    "\u2692",
+                    "\u25a4",
+                    "\u2261",
+                    "\u25ce",
+                    "\u2699",
+                  ][i]
+                }
               </span>
               {p}
               {p === "Sites" && <span className="count">{count}</span>}
@@ -175,6 +211,17 @@ export default function App() {
               </p>
             </div>
             <div className="actions">
+              {page === "Sites" && (
+                <button
+                  disabled={busy || !desktop}
+                  onClick={() => {
+                    setPage("New Project");
+                    setSelected(null);
+                  }}
+                >
+                  New Project
+                </button>
+              )}
               <button
                 disabled={busy || !desktop}
                 onClick={() => void act({ type: "stop" })}
@@ -215,7 +262,11 @@ export default function App() {
               {error}
             </div>
           )}
-          {notice && <div className="alert success">{notice}</div>}
+          {notice && (
+            <div className="alert success" style={{ whiteSpace: "pre-wrap" }}>
+              {notice}
+            </div>
+          )}
           {data?.issues.map((issue, i) => (
             <div className="alert" key={i}>
               {issue}
@@ -312,10 +363,35 @@ export default function App() {
                             <tbody>
                               {data.sites
                                 .filter((s) => s.present)
+                                .sort((a, b) => {
+                                  const p = data.developer?.preferences;
+                                  const av = p?.[a.id],
+                                    bv = p?.[b.id];
+                                  return (
+                                    Number(bv?.favorite ?? false) -
+                                      Number(av?.favorite ?? false) ||
+                                    Math.max(
+                                      bv?.opened_at ?? 0,
+                                      bv?.created_at ?? 0,
+                                    ) -
+                                      Math.max(
+                                        av?.opened_at ?? 0,
+                                        av?.created_at ?? 0,
+                                      ) ||
+                                    a.name.localeCompare(b.name)
+                                  );
+                                })
                                 .map((s) => (
                                   <tr
                                     key={s.id}
-                                    onClick={() => setSelected(s.id)}
+                                    onClick={() => {
+                                      setSelected(s.id);
+                                      void act({
+                                        type: "site_preference",
+                                        site_id: s.id,
+                                        operation: "opened",
+                                      });
+                                    }}
                                     className="clickable"
                                   >
                                     <td>
@@ -326,7 +402,13 @@ export default function App() {
                                             : "P"}
                                         </span>
                                         <div>
-                                          <strong>{s.hostname}</strong>
+                                          <strong>
+                                            {data.developer?.preferences[s.id]
+                                              ?.favorite
+                                              ? "★ "
+                                              : ""}
+                                            {s.hostname}
+                                          </strong>
                                           <small>
                                             {s.project_type === "laravel"
                                               ? "Laravel"
@@ -520,109 +602,44 @@ export default function App() {
                     ))}
                     <p className="footnote">
                       Available versions come from bundled, local, or
-                      integrity-verified remote catalog metadata. Node execution
-                      is planned.
+                      integrity-verified remote catalog metadata. Node uses
+                      managed site processes.
                     </p>
                   </>
                 )}
                 {page === "Databases" && (
+                  <DatabaseManager
+                    data={data}
+                    busy={busy}
+                    act={act}
+                    logs={() => {
+                      setLogSite(undefined);
+                      setPage("Logs");
+                    }}
+                  />
+                )}
+                {page === "New Project" && (
+                  <NewProject
+                    data={data}
+                    busy={busy}
+                    act={act}
+                    view={(id) => {
+                      setSelected(id);
+                      setPage("Sites");
+                    }}
+                  />
+                )}
+                {page === "Diagnostics" && (
                   <>
-                    <div className="alert">
-                      MySQL binds to 127.0.0.1. New development instances
-                      initialize with root and an empty password; project users
-                      receive database-specific grants with encrypted local
-                      credential references.
-                    </div>
-                    <section className="panel">
-                      <div className="panel-header">
-                        <h2>MySQL instances</h2>
-                      </div>
-                      {data.installed
-                        .filter(
-                          (r) =>
-                            r.manifest.runtime === "mysql" &&
-                            !data.databases.some(
-                              (db) => db.runtime_id === r.id,
-                            ),
-                        )
-                        .map((r) => (
-                          <div className="runtime-row" key={r.id}>
-                            {r.id}
-                            <button
-                              disabled={busy}
-                              onClick={() =>
-                                void act({
-                                  type: "database",
-                                  runtime: {
-                                    kind: "mysql",
-                                    version: r.manifest.version,
-                                  },
-                                  operation: "initialize",
-                                })
-                              }
-                            >
-                              Initialize persistent instance
-                            </button>
-                          </div>
-                        ))}
-                      {data.databases.length === 0 ? (
-                        <div className="empty">
-                          No instance initialized. Select an installed MySQL
-                          runtime for a site, then Start All.
-                        </div>
-                      ) : (
-                        data.databases.map((db) => (
-                          <div className="runtime-row" key={db.runtime_id}>
-                            <div>
-                              <strong>{db.runtime_id}</strong>
-                              <small>{db.data_path}</small>
-                            </div>
-                            <span>127.0.0.1:{db.port ?? "unallocated"}</span>
-                            <div className="actions">
-                              {(
-                                [
-                                  "start",
-                                  "stop",
-                                  "restart",
-                                  "validate",
-                                ] as const
-                              ).map((operation) => (
-                                <button
-                                  key={operation}
-                                  disabled={busy}
-                                  onClick={() =>
-                                    void act({
-                                      type: "database",
-                                      runtime: {
-                                        kind: "mysql",
-                                        version: db.runtime_id.slice(6),
-                                      },
-                                      operation,
-                                    })
-                                  }
-                                >
-                                  {operation}
-                                </button>
-                              ))}
-                            </div>
-                            <Badge
-                              value={
-                                data.services.find(
-                                  (s) => s.key === db.runtime_id,
-                                )?.status ??
-                                (db.initialized
-                                  ? "stopped"
-                                  : "initialization incomplete")
-                              }
-                            />
-                          </div>
-                        ))
-                      )}
-                    </section>
-                    <p className="footnote">
-                      Removing or moving a site never removes its database data.
-                      Engine versions are not upgraded automatically.
-                    </p>
+                    <Diagnostics data={data} busy={busy} act={act} />
+                    <button
+                      onClick={() => {
+                        setLogSite(undefined);
+                        setPage("Logs");
+                      }}
+                    >
+                      Open Logs
+                    </button>
                   </>
                 )}
                 {page === "Logs" && <Logs site={logSite} />}
@@ -639,7 +656,7 @@ export default function App() {
                     </button>
                     <section className="panel">
                       <div className="panel-header">
-                        <h2>Workspace</h2>
+                        <h2>General</h2>
                       </div>
                       <dl>
                         <dt>DEVONE_HOME</dt>
@@ -659,6 +676,7 @@ export default function App() {
                       </dl>
                     </section>
                     <ProductSettings data={data} busy={busy} act={act} />
+                    <DeveloperSettings data={data} busy={busy} act={act} />
                     <section className="panel">
                       <div className="panel-header">
                         <h2>Runtime catalog</h2>

@@ -35,7 +35,7 @@ const allowedPayload =
 for (const line of payloadStatements) {
   if (
     !allowedPayload.test(line) ||
-    /fixtures|node_modules|DEVONE_HOME|[\\/]debug[\\/]|devone-process-fixture/i.test(
+    /fixtures|temporary.projects|project-staging|backups|node_modules|DEVONE_HOME|[\\/]debug[\\/]|devone-process-fixture/i.test(
       line,
     )
   ) {

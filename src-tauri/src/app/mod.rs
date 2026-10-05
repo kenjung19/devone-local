@@ -19,6 +19,7 @@ use std::{
 };
 #[derive(Serialize)]
 pub struct Snapshot {
+    pub developer: crate::phase3::View,
     pub home: String,
     pub platform: String,
     pub sites: Vec<Site>,
@@ -85,6 +86,7 @@ impl Application {
         let store = Store::open(&home.path("devone.db"))?;
         crate::tools::migrate_defaults(&store)?;
         crate::tools::tasks::load(&home)?;
+        crate::phase3::templates::load(&home)?;
         let mut app = Self {
             home,
             store,
@@ -363,7 +365,9 @@ impl Application {
         }
         let mut setup = crate::setup::state(&self.store, &self.home)?;
         setup.dns_server = self.dns_owned();
+        let developer = crate::phase3::view(self)?;
         Ok(Snapshot {
+            developer,
             home: self.home.root().to_string_lossy().into(),
             platform: crate::platform::platform_key(),
             sites,
@@ -401,7 +405,7 @@ impl Application {
             environment_autostart: self.store.setting("autostart")?.as_deref() == Some("true"),
             tools: crate::tools::installed(&self.store)?,
             available_tools: crate::tools::available()?,
-            tool_defaults: ["pnpm", "composer"]
+            tool_defaults: ["pnpm", "composer", "mailpit"]
                 .into_iter()
                 .filter_map(|id| {
                     crate::tools::selected_version(&self.store, id, None)
@@ -917,6 +921,7 @@ impl Application {
         Ok(())
     }
     pub fn shutdown(&mut self) -> Result<()> {
+        crate::phase3::templates::cancel_home(&self.home);
         crate::tools::tasks::cancel_home(&self.home);
         self.active = false;
         self.routed.clear();

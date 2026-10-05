@@ -5,13 +5,14 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use tauri::{
-    Manager,
+    Emitter, Manager,
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
 };
 
 #[derive(Clone, PartialEq)]
 pub struct TrayView {
+    pub editor_available: bool,
     pub status: String,
     pub sites: Vec<(String, String, bool)>,
 }
@@ -37,7 +38,12 @@ pub fn view(core: &mut Application) -> crate::core::Result<TrayView> {
             (s.id, s.hostname, enabled)
         })
         .collect();
+    let editor_available = core.store.setting("editor.default")?.is_some_and(|id| {
+        crate::phase3::editors::list(&core.store)
+            .is_ok_and(|list| list.iter().any(|e| e.id == id && e.category == "editor"))
+    });
     Ok(TrayView {
+        editor_available,
         status: status.into(),
         sites,
     })
@@ -55,6 +61,13 @@ fn menu(app: &tauri::AppHandle, state: &TrayView) -> tauri::Result<Menu<tauri::W
         app,
         "open",
         "Open DEVONE Local",
+        true,
+        None::<&str>,
+    )?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        "new-project",
+        "New Project…",
         true,
         None::<&str>,
     )?)?;
@@ -78,13 +91,25 @@ fn menu(app: &tauri::AppHandle, state: &TrayView) -> tauri::Result<Menu<tauri::W
         )?)?;
     }
     for (id, hostname, enabled) in &state.sites {
-        sites.append(&MenuItem::with_id(
-            app,
-            format!("site:{id}"),
-            hostname,
-            *enabled,
-            None::<&str>,
-        )?)?;
+        let project = Submenu::new(app, hostname, true)?;
+        for (operation, label, available) in [
+            ("site", "Open Site", *enabled),
+            ("folder", "Open Folder", true),
+            ("editor", "Open in Default Editor", true),
+            ("terminal", "Terminal", true),
+        ] {
+            if operation == "editor" && !state.editor_available {
+                continue;
+            }
+            project.append(&MenuItem::with_id(
+                app,
+                format!("{operation}:{id}"),
+                label,
+                available,
+                None::<&str>,
+            )?)?;
+        }
+        sites.append(&project)?;
     }
     menu.append(&sites)?;
     menu.append(&MenuItem::with_id(
@@ -124,6 +149,7 @@ pub fn install(
     quitting: Arc<AtomicBool>,
 ) -> tauri::Result<()> {
     let initial = TrayView {
+        editor_available: false,
         status: "Starting".into(),
         sites: vec![],
     };
@@ -153,6 +179,11 @@ pub fn install(
                 restore(app);
                 return;
             }
+            if id == "new-project" {
+                restore(app);
+                let _ = app.emit("devone-new-project", ());
+                return;
+            }
             if id == "quit" && quitting.swap(true, Ordering::AcqRel) {
                 return;
             }
@@ -170,9 +201,28 @@ pub fn install(
                         "restart" => core.restart(),
                         "quit" => core.shutdown(),
                         "www" => crate::platform::open(&core.home.www().to_string_lossy()),
+                        _ if action.starts_with("folder:") => {
+                            let site = core.site(&action[7..])?;
+                            crate::platform::open(&site.project_path)
+                        }
+                        _ if action.starts_with("editor:") => {
+                            let site = core.site(&action[7..])?;
+                            crate::phase3::editors::open(
+                                &core.store,
+                                None,
+                                std::path::Path::new(&site.project_path),
+                            )?;
+                            crate::phase3::preferences::update(&core.store, &site.id, "opened")
+                        }
+                        _ if action.starts_with("terminal:") => {
+                            let site = core.site(&action[9..])?;
+                            crate::tools::terminal(&core.store, &core.home, &site)?;
+                            crate::phase3::preferences::update(&core.store, &site.id, "opened")
+                        }
                         _ if action.starts_with("site:") => {
                             let site = core.site(&action[5..])?;
-                            crate::platform::open(&format!("https://{}", site.hostname))
+                            crate::platform::open(&format!("https://{}", site.hostname))?;
+                            crate::phase3::preferences::update(&core.store, &site.id, "opened")
                         }
                         _ => Ok(()),
                     }

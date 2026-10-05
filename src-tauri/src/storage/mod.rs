@@ -11,7 +11,7 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 3 {
+        if version > 4 {
             return fail("State was created by a newer DEVONE release");
         }
         if version == 0 {
@@ -35,8 +35,22 @@ impl Store {
                 "PRAGMA user_version=3; COMMIT;"
             ))?;
         }
+        if version < 4 {
+            conn.execute_batch(concat!(
+                "BEGIN IMMEDIATE;",
+                include_str!("../../migrations/004_developer_workflows.sql"),
+                "PRAGMA user_version=4; COMMIT;"
+            ))?;
+        }
         // No stale PID is adopted or killed: Windows Job Objects clean up owned children.
         conn.execute("UPDATE process_state SET pid=NULL,status='stopped'", [])?;
+        Ok(Self { conn })
+    }
+    /// Background tasks share state without resetting controller-owned process records.
+    pub fn background(path: &Path) -> Result<Self> {
+        let conn = Connection::open(path)?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         Ok(Self { conn })
     }
     pub fn setting(&self, key: &str) -> Result<Option<String>> {
@@ -89,6 +103,6 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, 4);
     }
 }

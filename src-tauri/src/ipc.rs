@@ -15,6 +15,42 @@ pub type Shared = Arc<Mutex<Application>>;
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
+    CreateProject {
+        request: crate::phase3::templates::Request,
+    },
+    CancelCreation {
+        task_id: String,
+    },
+    Editor {
+        site_id: Option<String>,
+        editor_id: Option<String>,
+        operation: String,
+    },
+    SaveEditor {
+        editor: crate::phase3::editors::Editor,
+    },
+    SitePreference {
+        site_id: String,
+        operation: String,
+    },
+    DbAdmin {
+        runtime_id: String,
+        operation: String,
+        database_name: String,
+        username: Option<String>,
+        confirmation: Option<String>,
+        path: Option<String>,
+    },
+    Mail {
+        operation: String,
+    },
+    Diagnostics {
+        export: bool,
+    },
+    BackupPreferences {
+        keep_last: u32,
+    },
+
     SiteProcess {
         site_id: String,
         process_id: String,
@@ -137,6 +173,195 @@ pub struct Response {
 fn apply(app: &mut Application, action: Action) -> Result<Response> {
     let mut message = None;
     match action {
+        Action::CreateProject { request } => {
+            let template = crate::phase3::templates::registry(&app.home)?
+                .into_iter()
+                .find(|t| t.id == request.template)
+                .ok_or_else(|| Error::Message("Unknown template".into()))?;
+            crate::phase3::templates::validate_request(&app.store, &app.home, &request, &template)?;
+            if crate::phase3::templates::active(&app.home) {
+                return crate::core::fail("A creation task is already running");
+            }
+            let db_port = if request.database_name.is_some() {
+                let version = request.runtimes.get("mysql").unwrap();
+                let item = runtime::find(
+                    &app.store,
+                    &RuntimeRef {
+                        kind: RuntimeType::Mysql,
+                        version: version.clone(),
+                    },
+                )?;
+                crate::database::start(&app.store, &app.home, &mut app.supervisor, &item)?;
+                Some(app.store.conn.query_row(
+                    "SELECT port FROM port_allocations WHERE owner=?1",
+                    [&item.id],
+                    |r| r.get(0),
+                )?)
+            } else {
+                None
+            };
+            let mail = crate::phase3::mail::state(app)?;
+            if request.configure_mail && !mail.running {
+                return crate::core::fail(
+                    "Start Mailpit before configuring new Laravel mail settings",
+                );
+            }
+            message = Some(format!(
+                "Creation task started: {}",
+                crate::phase3::templates::start(
+                    &app.store,
+                    &app.home,
+                    request,
+                    db_port,
+                    mail.smtp_port
+                )?
+            ));
+        }
+        Action::CancelCreation { task_id } => {
+            crate::phase3::templates::cancel(&app.home, &task_id)?
+        }
+        Action::SaveEditor { editor } => crate::phase3::editors::save(&app.store, editor)?,
+        Action::Editor {
+            site_id,
+            editor_id,
+            operation,
+        } => match operation.as_str() {
+            "default" => crate::phase3::editors::set_default(
+                &app.store,
+                editor_id
+                    .as_deref()
+                    .ok_or_else(|| Error::Message("Choose editor".into()))?,
+            )?,
+            "open" => {
+                let path = site_id
+                    .as_ref()
+                    .map(|id| app.site(id))
+                    .transpose()?
+                    .map(|s| s.project_path)
+                    .unwrap_or_else(|| app.home.www().to_string_lossy().into());
+                crate::phase3::editors::open(&app.store, editor_id.as_deref(), Path::new(&path))?;
+                if let Some(id) = site_id {
+                    crate::phase3::preferences::update(&app.store, &id, "opened")?;
+                }
+            }
+            _ => return crate::core::fail("Unknown editor operation"),
+        },
+        Action::SitePreference { site_id, operation } => {
+            app.site(&site_id)?;
+            crate::phase3::preferences::update(&app.store, &site_id, &operation)?;
+        }
+        Action::Mail { operation } => crate::phase3::mail::action(app, &operation)?,
+        Action::BackupPreferences { keep_last } => {
+            if !(1..=100).contains(&keep_last) {
+                return crate::core::fail("Keep count must be 1–100");
+            }
+            app.store.set_setting(
+                "backups.preferences",
+                &serde_json::json!({"automatic":false,"keep_last":keep_last}).to_string(),
+            )?;
+            message=Some("Saved future retention preference. Backups remain manual; no automatic deletion or scheduling.".into());
+        }
+        Action::Diagnostics { export } => {
+            let report = crate::phase3::diagnostics::report(app)?;
+            app.store.set_setting("diagnostics.last", &report)?;
+            if export {
+                let folder = app.home.path("logs/diagnostics");
+                std::fs::create_dir_all(&folder)?;
+                let path = folder.join(format!("report-{}.json", uuid::Uuid::new_v4()));
+                crate::runtime::atomic_write(&path, report.as_bytes())?;
+                message = Some(format!(
+                    "Saved report: {}. Contains local paths; review before sharing.",
+                    path.display()
+                ));
+            } else {
+                message = Some(report);
+            }
+        }
+        Action::DbAdmin {
+            runtime_id,
+            operation,
+            database_name,
+            username,
+            confirmation,
+            path,
+        } => {
+            match operation.as_str() {
+                "list" => {
+                    let databases = crate::database::admin::list(app, &runtime_id)?;
+                    let mut catalog: serde_json::Value = serde_json::from_str(
+                        &app.store
+                            .setting("database.catalog")?
+                            .unwrap_or_else(|| "{}".into()),
+                    )?;
+                    catalog[&runtime_id] = serde_json::to_value(databases)?;
+                    app.store
+                        .set_setting("database.catalog", &catalog.to_string())?;
+                }
+                "create" => crate::database::admin::create(
+                    app,
+                    &runtime_id,
+                    &database_name,
+                    username.as_deref(),
+                )?,
+                "delete" => crate::database::admin::delete(
+                    app,
+                    &runtime_id,
+                    &database_name,
+                    confirmation.as_deref().unwrap_or(""),
+                )?,
+                "backup" => {
+                    let b = crate::database::admin::backup(app, &runtime_id, &database_name)?;
+                    message = Some(format!(
+                        "Backup complete: {} (SHA-256 {})",
+                        b.path, b.sha256
+                    ));
+                }
+                "restore" => {
+                    let file = path.ok_or_else(|| Error::Message("Select a SQL file".into()))?;
+                    crate::database::admin::restore(
+                        app,
+                        &runtime_id,
+                        &database_name,
+                        Path::new(&file),
+                        confirmation.as_deref().unwrap_or(""),
+                    )?;
+                    message=Some("Restore completed. SQL was applied with the database-specific project user.".into());
+                }
+                "credential" => {
+                    let b = crate::database::admin::managed(&app.store)?
+                        .into_iter()
+                        .find(|b| b.runtime_id == runtime_id && b.database_name == database_name)
+                        .ok_or_else(|| Error::Message("Managed database not found".into()))?;
+                    message = Some(
+                        crate::database::provision::secret(&app.home, &b.credential_ref)?
+                            .to_string(),
+                    );
+                }
+                "connection" => {
+                    let b = crate::database::admin::managed(&app.store)?
+                        .into_iter()
+                        .find(|b| b.runtime_id == runtime_id && b.database_name == database_name)
+                        .ok_or_else(|| Error::Message("Managed database not found".into()))?;
+                    let port: Option<u16> = app
+                        .store
+                        .conn
+                        .query_row(
+                            "SELECT port FROM port_allocations WHERE owner=?1",
+                            [&runtime_id],
+                            |r| r.get(0),
+                        )
+                        .ok();
+                    message = Some(format!(
+                        "Host: 127.0.0.1\nPort: {}\nDatabase: {}\nUser: {}\nPassword omitted. External clients open separately without credential arguments.",
+                        port.map_or("not allocated".into(), |p| p.to_string()),
+                        b.database_name,
+                        b.username
+                    ));
+                }
+                _ => return crate::core::fail("Unknown database administration action"),
+            }
+        }
+
         Action::SiteProcess {
             site_id,
             process_id,
@@ -265,6 +490,15 @@ fn apply(app: &mut Application, action: Action) -> Result<Response> {
         } => match operation.as_str() {
             "default" => crate::tools::set_default(&app.store, &app.home, &id, &version)?,
             "remove" => {
+                if crate::phase3::templates::active(&app.home) {
+                    return crate::core::fail("A project creation task may be using this tool");
+                }
+                if app
+                    .supervisor
+                    .uses_path(&app.home.path(&format!("tools/{id}/{version}")))
+                {
+                    return crate::core::fail("A running process uses this tool; stop it first");
+                }
                 if crate::tools::tasks::list()
                     .iter()
                     .any(|t| t.manager == id && t.status == "running")
@@ -274,9 +508,11 @@ fn apply(app: &mut Application, action: Action) -> Result<Response> {
                 crate::tools::remove(&app.store, &app.home, &app.sites()?, &id, &version)?;
             }
             "validate" => {
-                let r = runtime_version.ok_or_else(|| {
-                    Error::Message("Choose managed runtime for validation".into())
-                })?;
+                let r = runtime_version
+                    .or_else(|| (id == "mailpit").then(String::new))
+                    .ok_or_else(|| {
+                        Error::Message("Choose managed runtime for validation".into())
+                    })?;
                 message = Some(crate::tools::validate(
                     &app.store, &app.home, &id, &version, &r,
                 )?);
@@ -294,7 +530,12 @@ fn apply(app: &mut Application, action: Action) -> Result<Response> {
         Action::Install { runtime } => {
             app.install(runtime)?;
         }
-        Action::Remove { runtime } => runtime::remove(&app.store, &app.home, &runtime)?,
+        Action::Remove { runtime } => {
+            if crate::phase3::templates::active(&app.home) {
+                return crate::core::fail("Wait for project creation before removing runtimes");
+            }
+            runtime::remove(&app.store, &app.home, &runtime)?;
+        }
         Action::Default { runtime } => app.set_default(runtime)?,
         Action::Override {
             site_id,
@@ -304,6 +545,7 @@ fn apply(app: &mut Application, action: Action) -> Result<Response> {
         Action::OpenSite { site_id } => {
             let site = app.site(&site_id)?;
             crate::platform::open(&format!("https://{}", site.hostname))?;
+            crate::phase3::preferences::update(&app.store, &site_id, "opened")?;
         }
         Action::OpenFolder { site_id } => {
             let path = if let Some(id) = site_id {
@@ -316,6 +558,7 @@ fn apply(app: &mut Application, action: Action) -> Result<Response> {
         Action::Terminal { site_id } => {
             let site = app.site(&site_id)?;
             crate::tools::terminal(&app.store, &app.home, &site)?;
+            crate::phase3::preferences::update(&app.store, &site_id, "opened")?;
         }
         Action::Dns => app.setup_dns(false)?,
         Action::RemoveDns => app.setup_dns(true)?,
@@ -564,4 +807,16 @@ mod process_editor_tests {
                 .any(|p| p.definition.id == "web" && !p.enabled)
         );
     }
+}
+
+#[tauri::command]
+pub async fn select_sql_file() -> std::result::Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| -> Result<Option<String>> {
+        if !cfg!(windows) {return crate::core::fail("SQL file selection currently supports Windows");}
+        let windows=std::env::var_os("SystemRoot").ok_or_else(||Error::Message("SystemRoot unavailable".into()))?;
+        let binary=Path::new(&windows).join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let script="Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.OpenFileDialog; $dialog.Filter = 'SQL dump (*.sql)|*.sql'; $dialog.Title = 'Select a trusted SQL dump for explicit restore'; if ($dialog.ShowDialog() -eq 'OK') { [Console]::Write($dialog.FileName) }";
+        let output=crate::process::run_checked(&binary,&["-NoProfile".into(),"-STA".into(),"-Command".into(),script.into()],Path::new(&windows),&Default::default(),std::time::Duration::from_secs(180))?;
+        let value=output.trim();Ok((!value.is_empty()).then(||value.to_string()))
+    }).await.map_err(|e|e.to_string())?.map_err(|e|e.to_string())
 }

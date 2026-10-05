@@ -1,0 +1,74 @@
+[
+  {
+    "id": "blank-php",
+    "name": "Blank PHP",
+    "category": "PHP",
+    "strategy": "blank_php",
+    "runtimes": {
+      "php": "7.4.0"
+    },
+    "tools": []
+  },
+  {
+    "id": "laravel",
+    "name": "Laravel",
+    "category": "PHP",
+    "strategy": "composer",
+    "version": "13.10.1",
+    "runtimes": {
+      "php": "8.3.0"
+    },
+    "tools": [
+      "composer"
+    ]
+  },
+  {
+    "id": "wordpress",
+    "name": "WordPress",
+    "category": "PHP",
+    "strategy": "wordpress",
+    "version": "7.1.2",
+    "runtimes": {
+      "php": "8.3.0",
+      "mysql": "8.0.0"
+    },
+    "tools": [],
+    "url": "https://wordpress.org/wordpress-7.1.2.zip",
+    "sha256": "8fc96c59a78b7219e4a130222b7fadb51b03e503e8b0123beaa7e28961c21ce2",
+    "archive_root": "wordpress"
+  },
+  {
+    "id": "next",
+    "name": "Next.js",
+    "category": "Node",
+    "strategy": "next",
+    "version": "16.3.8",
+    "runtimes": {
+      "node": "24.0.0"
+    },
+    "tools": [
+      "pnpm"
+    ]
+  },
+  {
+    "id": "react-vite",
+    "name": "React + Vite (TypeScript)",
+    "category": "Node",
+    "strategy": "react_vite",
+    "version": "8.3.2",
+    "runtimes": {
+      "node": "24.0.0"
+    },
+    "tools": [
+      "pnpm"
+    ]
+  },
+  {
+    "id": "static",
+    "name": "Static HTML",
+    "category": "Static",
+    "strategy": "static",
+    "runtimes": {},
+    "tools": []
+  }
+]

@@ -9,6 +9,7 @@ import type {
 } from "./contracts";
 export const desktop = isTauri();
 export const bridge = {
+  selectSqlFile: () => invoke<string | null>("select_sql_file"),
   inspectImport: (kind: RuntimeKind, source: string) =>
     invoke<Manifest>("inspect_import", { kind, source }),
   progress: () => invoke<InstallProgress | null>("install_progress"),
