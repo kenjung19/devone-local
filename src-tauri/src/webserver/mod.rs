@@ -12,18 +12,30 @@ pub trait WebServer {
     fn generate(&self, home: &Home, sites: &[(Site, u16)], admin: u16) -> Result<String>;
 }
 pub struct Caddy;
-fn quoted(path: &std::path::Path) -> Result<String> {
+pub(crate) fn quoted(path: &std::path::Path) -> Result<String> {
     let text = path.to_string_lossy().replace('\\', "/");
     if text.contains(['\n', '\r', '"', '{', '}']) {
         return fail("Path cannot be represented safely in Caddy configuration");
     }
     Ok(format!("\"{text}\""))
 }
+pub(crate) fn pki_config(home: &Home) -> Result<String> {
+    use crate::tls::TlsProvider;
+    if crate::tls::CaddyTls.ca_path(home) != crate::tls::authority::root_path(home) {
+        return Ok(String::new());
+    }
+    Ok(format!(
+        " pki {{\n  ca local {{\n   name \"DEVONE Local CA\"\n   root {{\n    format pem_file\n    cert {}\n    key {}\n   }}\n  }}\n }}\n",
+        quoted(&crate::tls::authority::root_path(home))?,
+        quoted(&crate::tls::authority::key_path(home))?
+    ))
+}
 impl WebServer for Caddy {
     fn generate(&self, home: &Home, sites: &[(Site, u16)], admin: u16) -> Result<String> {
         let mut text = format!(
-            "# DEVONE generated configuration\n{{\n admin 127.0.0.1:{admin}\n auto_https disable_redirects\n skip_install_trust\n storage file_system {{\n  root {}\n }}\n}}\n",
-            quoted(&home.path("certs/caddy"))?
+            "# DEVONE generated configuration\n{{\n admin 127.0.0.1:{admin}\n auto_https disable_redirects\n skip_install_trust\n storage file_system {{\n  root {}\n }}\n{}}}\n",
+            quoted(&home.path("certs/caddy"))?,
+            pki_config(home)?
         );
         for (site, port) in sites {
             crate::platform::validate_local_host(&site.hostname)?;
@@ -71,6 +83,7 @@ pub fn reconcile(
     if sites.is_empty() {
         return supervisor.stop(store, &runtime.id);
     }
+    crate::tls::ensure_ca(home)?;
     let admin = if supervisor.contains(&runtime.id) {
         store.conn.query_row(
             "SELECT port FROM port_allocations WHERE owner='caddy-admin'",
@@ -190,5 +203,14 @@ mod tests {
     #[test]
     fn configuration_rejects_injection() {
         assert!(quoted(std::path::Path::new("bad\nroot")).is_err());
+    }
+    #[test]
+    fn root_paths_are_quoted_in_generated_pki_configuration() {
+        let home = Home::new(std::path::Path::new("C:/Home with spaces"));
+        let text = Caddy.generate(&home, &[], 12345).unwrap();
+        assert!(text.contains("pki {\n  ca local {"));
+        assert!(text.contains("cert \"C:/Home with spaces/certs/devone-ca/root.crt\""));
+        assert!(text.contains("key \"C:/Home with spaces/certs/devone-ca/root.key\""));
+        assert!(text.contains("skip_install_trust"));
     }
 }

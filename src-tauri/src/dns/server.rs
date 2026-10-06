@@ -101,6 +101,9 @@ impl Resolver {
                 while !b.load(Ordering::Relaxed) {
                     match tcp.accept() {
                         Ok((mut s, _)) => {
+                            if s.set_nonblocking(false).is_err() {
+                                continue;
+                            }
                             let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
                             let _ = s.set_write_timeout(Some(Duration::from_millis(200)));
                             let mut len = [0; 2];
@@ -247,7 +250,10 @@ mod tests {
         let mut s = std::net::TcpStream::connect(("127.0.0.1", r.port)).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let q = query("future.test", 1);
+        // Let accept run before sending, then split the frame across reads.
+        std::thread::sleep(Duration::from_millis(75));
         s.write_all(&(q.len() as u16).to_be_bytes()).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
         s.write_all(&q).unwrap();
         let mut len = [0; 2];
         s.read_exact(&mut len).unwrap();

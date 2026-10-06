@@ -37,7 +37,7 @@ fn source(name: &str) -> PathBuf {
     )
 }
 fn request(home: &Home, hostname: &str) -> serde_json::Value {
-    let pem = std::fs::read(home.path("certs/caddy/pki/authorities/local/root.crt")).unwrap();
+    let pem = std::fs::read(devone::tls::authority::root_path(home)).unwrap();
     let ca = reqwest::Certificate::from_pem(&pem).unwrap();
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
@@ -146,10 +146,7 @@ fn concurrent_native_runtime_workflow() {
         "One controller per home"
     );
     devone::setup::prepare_ca(&app.store, &home).unwrap();
-    assert!(
-        home.path("certs/caddy/pki/authorities/local/root.crt")
-            .is_file()
-    );
+    assert!(devone::tls::authority::root_path(&home).is_file());
     app.start_all().unwrap();
     assert_eq!(request(&home, "modern.test")["php"], "8.5.1");
     assert_eq!(request(&home, "legacy.test")["php"], "8.3.28");
@@ -395,7 +392,7 @@ fn concurrent_native_runtime_workflow() {
     // Recreate while services run: only Caddy changes, PHP/MySQL keep their PIDs.
     app.start_all().unwrap();
     let before_ca = app.snapshot().unwrap();
-    let ca_path = home.path("certs/caddy/pki/authorities/local/root.crt");
+    let ca_path = devone::tls::authority::root_path(&home);
     let previous_ca = devone::tls::fingerprint(&ca_path).unwrap();
     app.recreate_ca(true).unwrap();
     assert_ne!(devone::tls::fingerprint(&ca_path).unwrap(), previous_ca);

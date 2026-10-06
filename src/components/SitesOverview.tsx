@@ -6,6 +6,7 @@ import {
   siteStatus,
 } from "../presentation";
 import { Badge } from "./Badge";
+import { CaUpgradeNotice } from "./CaUpgradeNotice";
 export function SitesOverview({
   data,
   busy,
@@ -32,6 +33,7 @@ export function SitesOverview({
   });
   return (
     <>
+      <CaUpgradeNotice data={data} busy={busy} act={act} />
       {!data.setup.caddy && (
         <div className="alert">
           Install the Web Server from Runtimes to start sites.

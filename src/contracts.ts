@@ -80,6 +80,7 @@ export interface Snapshot {
     dns_system: boolean;
     ca_present: boolean;
     ca_trusted: boolean;
+    ca_upgrade_pending?: boolean;
     caddy: boolean;
     php: boolean;
     mysql: boolean;
@@ -206,6 +207,7 @@ export type Action =
         | "remove_dns"
         | "hosts_fallback"
         | "prepare_ca"
+        | "upgrade_ca"
         | "reopen_setup";
     }
   | { type: "import"; manifest: Manifest; source: string }

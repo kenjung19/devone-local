@@ -5,6 +5,11 @@ fn main() {
             eprintln!("failure-output");
             std::process::exit(7);
         }
+        Some("healthy-then-fail") => {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            eprintln!("failure-output");
+            std::process::exit(7);
+        }
         Some("listen") => {
             use std::io::{Read, Write};
             let port = std::env::args().nth(2).unwrap().parse::<u16>().unwrap();

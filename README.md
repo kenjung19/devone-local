@@ -12,6 +12,14 @@ Setup guides you through Home, Web Server, PHP, MySQL, Local Domains, HTTPS and 
 
 Setup is a full page and can be reopened from Settings. If you skip an incomplete item, Sites explains what remains unavailable.
 
+## HTTPS certificate authority
+
+Fresh Homes use a DEVONE-generated P-256 root at `certs/devone-ca/root.crt` and `root.key`. Its critical name constraints permit DNS names under `test` and exclude all IPv4/IPv6 addresses. Caddy loads this root, manages its intermediate and renews local site certificates. Windows trust is scoped to CurrentUser\Root and exact CA identity; Caddy's automatic trust installation remains disabled.
+
+Existing Homes keep their legacy Caddy CA until you select **Upgrade HTTPS certificate authority** in Settings / HTTPS, Sites or Setup. Windows may display a trust confirmation. Cancelling retains legacy trust and restores the legacy served chain; select Upgrade again to resume. The old exact owned root is removed from trust only after replacement trust is confirmed, and old CA/certificate files remain in `backups/legacy-ca-*`. Recreate CA generates another constrained root and preserves the previous files in backups.
+
+The CA directory and private key have protected Windows ACLs for the current user and SYSTEM. These ACLs do not block same-user npm/Composer processes; the certificate name constraints are the control for a stolen key. They do not sandbox malicious project code or prevent it from changing the user's own trust settings. See [Windows hardening](docs/windows-hardening.md) for verification and legacy-upgrade checks.
+
 ## Existing projects
 
 1. Choose **Open www** and copy a project folder into it.

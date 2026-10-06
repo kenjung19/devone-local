@@ -51,7 +51,7 @@ MySQL administrator สำหรับ development instance ใหม่ยั�
 
 Hosts fallback เป็น action explicit เท่านั้น ใช้ managed block เดิมและต้องมีสิทธิ์เขียน hosts ระบบ แอปไม่เรียกมันใน discovery ปกติ ค่าเริ่มต้นคือ wildcard DNS
 
-Caddy ใช้ local CA ใน `certs/caddy` Trust ใช้ current-user store และตรวจ actual certificate context ใน Windows ไม่อาศัย SQLite trusted flag อย่างเดียว
+Caddy โหลด DEVONE root ใน `certs/devone-ca/root.crt` และ `root.key` โดย root จำกัดชื่อ DNS เป็น `test` และ subdomains พร้อมปฏิเสธ IP ทั้งหมด Caddy เก็บ intermediate และ leaf certificates ใน `certs/caddy` การ trust ใช้ current-user store และตรวจ actual certificate context ใน Windows ไม่อาศัย SQLite trusted flag อย่างเดียว Home เก่าต้องกด Upgrade HTTPS certificate authority ก่อนเปลี่ยน CA; cancellation คืน served chain เดิมและยังคง legacy trust
 
 ## Runtime catalog
 

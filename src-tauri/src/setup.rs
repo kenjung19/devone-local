@@ -15,6 +15,7 @@ pub struct State {
     pub dns_system: bool,
     pub ca_present: bool,
     pub ca_trusted: bool,
+    pub ca_upgrade_pending: bool,
     pub caddy: bool,
     pub php: bool,
     pub mysql: bool,
@@ -47,6 +48,7 @@ pub fn state(store: &Store, home: &Home) -> Result<State> {
         dns_server: crate::dns::server::probe(53).is_ok(),
         ca_present: ca.is_file(),
         ca_trusted: crate::platform::ca_trusted(&ca),
+        ca_upgrade_pending: crate::tls::upgrade_pending(store, home)?,
         caddy: has(RuntimeType::Caddy),
         php: has(RuntimeType::Php),
         mysql: has(RuntimeType::Mysql)
@@ -89,15 +91,14 @@ pub fn prepare_ca(store: &Store, home: &Home) -> Result<()> {
         .ok_or_else(|| crate::core::Error::Message("Install/import Caddy first".into()))?;
     let r = runtime::find(store, &r)?;
     runtime::validate_at(&r.manifest, &r.root(home))?;
+    crate::tls::ensure_ca(home)?;
     let path = home.path("cache/setup-Caddyfile");
-    let storage = home
-        .path("certs/caddy")
-        .to_string_lossy()
-        .replace('\\', "/");
+    let storage = crate::webserver::quoted(&home.path("certs/caddy"))?;
     std::fs::write(
         &path,
         format!(
-            "{{\n admin off\n skip_install_trust\n storage file_system {{\n root \"{storage}\"\n }}\n}}\nhttps://devone.test {{\n bind 127.0.0.1\n tls internal\n respond \"DEVONE\"\n}}\n"
+            "{{\n admin off\n skip_install_trust\n storage file_system {{\n root {storage}\n }}\n{}}}\nhttps://devone.test {{\n bind 127.0.0.1\n tls internal\n respond \"DEVONE\"\n}}\n",
+            crate::webserver::pki_config(home)?
         ),
     )?;
     crate::process::run_checked(

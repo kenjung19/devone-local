@@ -7,6 +7,7 @@ import type {
   InstallProgress,
 } from "../contracts";
 import { SetupRuntime } from "./SetupRuntime";
+import { CaUpgradeNotice } from "./CaUpgradeNotice";
 const steps = [
   "Home",
   "Web Server",
@@ -166,6 +167,7 @@ export function Setup({
           {step === 5 && (
             <>
               <h2>ใช้งาน HTTPS ในเครื่อง</h2>
+              <CaUpgradeNotice data={data} busy={busy} act={act} />
               <p>
                 สร้าง Local CA แล้วติดตั้ง trust ในบัญชี Windows นี้
                 เพื่อเปิดโปรเจกต์ผ่าน HTTPS

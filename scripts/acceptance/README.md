@@ -24,6 +24,11 @@ Missing elevation is not a passing integration result or a product failure.
 
 ## Explicit current-user CA acceptance
 
+Current fresh-Home CA acceptance uses `certs/devone-ca/root.crt`, a constrained
+DEVONE root loaded by Caddy. It does not certify the legacy upgrade dialog flow;
+that explicit scenario is documented in `docs/windows-hardening.md`. Earlier
+acceptance reports describe earlier Caddy-generated roots and remain historical.
+
 From CMD run `scripts\acceptance\windows-ca.cmd`. This opts into the two native
 system-CA tests. Windows may ask to trust each disposable root; approve only the
 certificate belonging to the printed disposable Home. The printed SHA-256 is

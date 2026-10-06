@@ -39,6 +39,7 @@ struct Owned {
 }
 struct Recovery {
     spec: Spec,
+    healthy: bool,
     attempts: u32,
     due: Option<Instant>,
     blocked: bool,
@@ -68,6 +69,7 @@ impl Supervisor {
             spec.key.clone(),
             Recovery {
                 spec: spec.clone(),
+                healthy: false,
                 attempts: 0,
                 due: None,
                 blocked: false,
@@ -125,6 +127,9 @@ impl Supervisor {
                     "UPDATE process_state SET status='running' WHERE service_key=?1",
                     [key],
                 )?;
+                if let Some(recovery) = self.recovery.get_mut(key) {
+                    recovery.healthy = true;
+                }
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -147,7 +152,9 @@ impl Supervisor {
                 self.children.remove(&key);
                 store.conn.execute("UPDATE process_state SET pid=NULL,status='exited',updated_at=?2 WHERE service_key=?1",rusqlite::params![key,timestamp()])?;
                 tracing::warn!(service=%key,exit=%status,"process exited");
-                if let Some(r) = self.recovery.get_mut(&key) {
+                if let Some(r) = self.recovery.get_mut(&key)
+                    && r.healthy
+                {
                     use std::io::Write;
                     if let Ok(mut log) = OpenOptions::new()
                         .create(true)
@@ -166,6 +173,8 @@ impl Supervisor {
                         r.blocked = true;
                         r.due = None;
                     }
+                } else {
+                    self.recovery.remove(&key);
                 }
             }
         }
@@ -220,6 +229,9 @@ impl Supervisor {
             let child = self.children.get(&key);
             let port = child.and_then(|c| c.spec.port);
             let healthy = child.is_some_and(process_healthy);
+            if healthy && let Some(recovery) = self.recovery.get_mut(&key) {
+                recovery.healthy = true;
+            }
             let actual = if child.is_some() {
                 if healthy {
                     "running"
@@ -266,41 +278,66 @@ impl Supervisor {
     pub fn contains(&self, key: &str) -> bool {
         self.children.contains_key(key)
     }
+    pub(crate) fn may_start_automatically(&self, key: &str, fresh_start: bool) -> bool {
+        self.recovery
+            .get(key)
+            .map_or(fresh_start, |r| r.healthy && !r.blocked && r.due.is_none())
+    }
     pub fn stop(&mut self, store: &Store, key: &str) -> Result<()> {
         self.recovery.remove(key);
+        let mut errors = Vec::new();
         if let Some(mut p) = self.children.remove(key) {
-            if p.spec.graceful.is_some() && p.child.try_wait()?.is_none() {
-                let result = if let Some(port) = p.spec.port {
-                    if key.starts_with("mysql:") {
-                        crate::database::provision::shutdown_owned(port, &p._ownership)
-                    } else if key.starts_with("caddy:") {
-                        stop_caddy_owned(port, p.child.id())
+            let stopped = (|| -> Result<()> {
+                if p.spec.graceful.is_some() && p.child.try_wait()?.is_none() {
+                    let result = if let Some(port) = p.spec.port {
+                        if key.starts_with("mysql:") {
+                            crate::database::provision::shutdown_owned(port, &p._ownership)
+                        } else if key.starts_with("caddy:") {
+                            stop_caddy_owned(port, p.child.id())
+                        } else {
+                            Ok(())
+                        }
                     } else {
                         Ok(())
+                    };
+                    if let Err(e) = result {
+                        tracing::warn!(service=%key,error=%e,"graceful shutdown skipped/failed; terminating owned child");
                     }
-                } else {
-                    Ok(())
-                };
-                if let Err(e) = result {
-                    tracing::warn!(service=%key,error=%e,"graceful shutdown skipped/failed; terminating owned child");
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    while Instant::now() < deadline && p.child.try_wait()?.is_none() {
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
                 }
-                let deadline = Instant::now() + Duration::from_secs(5);
-                while Instant::now() < deadline && p.child.try_wait()?.is_none() {
-                    std::thread::sleep(Duration::from_millis(100));
+                if p.child.try_wait()?.is_none() {
+                    p.child.kill()?;
                 }
+                let _ = p.child.wait()?;
+                Ok(())
+            })();
+            if let Err(e) = stopped {
+                errors.push(e.to_string());
             }
-            if p.child.try_wait()?.is_none() {
-                p.child.kill()?;
+            // Always terminate owned descendants, including after a child API error.
+            if let Err(e) = p._ownership.terminate() {
+                errors.push(e.to_string());
             }
-            let _ = p.child.wait()?;
-            p._ownership.terminate()?;
-            tracing::info!(service=%key,"process stopped");
+            if errors.is_empty() {
+                tracing::info!(service=%key,"process stopped");
+            } else {
+                tracing::warn!(service=%key,errors=?errors,"process shutdown reported errors");
+            }
         }
-        store.conn.execute(
+        if let Err(e) = store.conn.execute(
             "UPDATE process_state SET pid=NULL,status='stopped',updated_at=?2 WHERE service_key=?1",
             rusqlite::params![key, timestamp()],
-        )?;
-        Ok(())
+        ) {
+            errors.push(e.to_string());
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            fail(format!("{key}: {}", errors.join("; ")))
+        }
     }
     pub fn stop_all(&mut self, store: &Store) -> Result<()> {
         let mut keys: Vec<_> = self
@@ -320,10 +357,17 @@ impl Supervisor {
                 2
             }
         });
+        let mut errors = Vec::new();
         for key in keys {
-            self.stop(store, &key)?;
+            if let Err(e) = self.stop(store, &key) {
+                errors.push(e.to_string());
+            }
         }
-        Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            fail(format!("Failed to stop services: {}", errors.join("; ")))
+        }
     }
 }
 impl Drop for Supervisor {
@@ -515,5 +559,108 @@ fn process_healthy(p: &Owned) -> bool {
             .spec
             .port
             .is_some_and(|port| listener_healthy(&p.spec, &p._ownership, port)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn automatic_starts_do_not_replay_failed_startup_or_bypass_recovery() {
+        let mut supervisor = Supervisor::default();
+        let key = "caddy:test";
+        assert!(supervisor.may_start_automatically(key, true));
+        assert!(!supervisor.may_start_automatically(key, false));
+        supervisor.recovery.insert(
+            key.into(),
+            Recovery {
+                spec: Spec {
+                    key: key.into(),
+                    binary: PathBuf::new(),
+                    args: Vec::new(),
+                    cwd: PathBuf::new(),
+                    env: BTreeMap::new(),
+                    port: None,
+                    log: PathBuf::new(),
+                    health: HealthStrategy::ProcessAlive,
+                    graceful: None,
+                },
+                healthy: false,
+                attempts: 0,
+                due: None,
+                blocked: false,
+            },
+        );
+        assert!(!supervisor.may_start_automatically(key, true));
+        supervisor.recovery.get_mut(key).unwrap().healthy = true;
+        assert!(supervisor.may_start_automatically(key, false));
+        supervisor.recovery.get_mut(key).unwrap().due = Some(Instant::now());
+        assert!(!supervisor.may_start_automatically(key, false));
+        let recovery = supervisor.recovery.get_mut(key).unwrap();
+        recovery.due = None;
+        recovery.blocked = true;
+        assert!(!supervisor.may_start_automatically(key, false));
+    }
+
+    #[test]
+    fn stop_all_clears_every_recovery_and_attempts_every_state_update_on_error() {
+        let d = tempfile::tempdir().unwrap();
+        let store = Store::open(&d.path().join("db")).unwrap();
+        let mut supervisor = Supervisor::default();
+        for key in ["caddy:failed", "php:failed", "mysql:ok"] {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO process_state VALUES(?1,123,'running',0)",
+                    [key],
+                )
+                .unwrap();
+            supervisor.recovery.insert(
+                key.into(),
+                Recovery {
+                    spec: Spec {
+                        key: key.into(),
+                        binary: d.path().join("unused"),
+                        args: Vec::new(),
+                        cwd: d.path().into(),
+                        env: BTreeMap::new(),
+                        port: None,
+                        log: d.path().join("log"),
+                        health: HealthStrategy::ProcessAlive,
+                        graceful: None,
+                    },
+                    healthy: true,
+                    attempts: 1,
+                    due: Some(Instant::now()),
+                    blocked: false,
+                },
+            );
+        }
+        store.conn.execute_batch("CREATE TRIGGER fail_stop BEFORE UPDATE ON process_state WHEN OLD.service_key != 'mysql:ok' BEGIN SELECT RAISE(FAIL, 'injected update failure'); END;").unwrap();
+        let error = supervisor.stop_all(&store).unwrap_err().to_string();
+        assert!(error.contains("caddy:failed"), "{error}");
+        assert!(error.contains("php:failed"), "{error}");
+        assert!(supervisor.recovery.is_empty());
+        let state: (Option<u32>, String) = store
+            .conn
+            .query_row(
+                "SELECT pid,status FROM process_state WHERE service_key='mysql:ok'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, (None, "stopped".into()));
+        // Failed writes are reported; once storage permits updates, stop repairs the rows.
+        store.conn.execute_batch("DROP TRIGGER fail_stop;").unwrap();
+        supervisor.stop(&store, "caddy:failed").unwrap();
+        supervisor.stop(&store, "php:failed").unwrap();
+        assert!(
+            supervisor
+                .states(&store)
+                .unwrap()
+                .iter()
+                .all(|state| state.pid.is_none() && state.status == "stopped")
+        );
     }
 }

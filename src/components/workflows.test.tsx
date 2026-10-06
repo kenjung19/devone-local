@@ -106,6 +106,18 @@ const developer: NonNullable<Snapshot["developer"]> = {
 
 const act = async () => {};
 describe("desktop setup and configuration presentation", () => {
+  it("offers an explicit non-modal CA upgrade only for legacy/pending installs", () => {
+    const legacy = { ...data, setup: { ...data.setup, caddy: true, ca_present: true, ca_trusted: true, ca_upgrade_pending: true } };
+    const settings = renderToStaticMarkup(<ProductSettings data={legacy} busy={false} act={act} />);
+    expect(settings).toContain("Upgrade HTTPS certificate authority");
+    expect(settings).toContain("existing CA stays trusted");
+    expect(settings).not.toContain('role="dialog"');
+    const setup = renderToStaticMarkup(<Setup data={legacy} busy={false} error="" progress={null} act={act} importRuntime={() => {}} close={() => {}} initialStep={5} />);
+    expect(setup).toContain("Upgrade HTTPS certificate authority");
+    const sites = renderToStaticMarkup(<SitesOverview data={legacy} busy={false} act={act} view={() => {}} create={() => {}} />);
+    expect(sites).toContain("Upgrade HTTPS certificate authority");
+    expect(renderToStaticMarkup(<ProductSettings data={data} busy={false} act={act} />)).not.toContain("Upgrade HTTPS certificate authority");
+  });
   it("keeps login and environment preferences separate and does not mark a stopped resolver ready", () => {
     const html = renderToStaticMarkup(
       <ProductSettings

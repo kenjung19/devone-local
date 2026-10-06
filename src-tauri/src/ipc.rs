@@ -122,6 +122,7 @@ pub enum Action {
     RemoveDns,
     HostsFallback,
     PrepareCa,
+    UpgradeCa,
     FinishSetup {
         skip: bool,
     },
@@ -572,6 +573,12 @@ fn apply(app: &mut Application, action: Action) -> Result<Response> {
             crate::dns::HostsFallback.reconcile(&hosts)?;
         }
         Action::PrepareCa => crate::setup::prepare_ca(&app.store, &app.home)?,
+        Action::UpgradeCa => {
+            app.upgrade_ca()?;
+            message = Some(
+                "HTTPS CA upgraded to .test-only trust; legacy CA is preserved in backups.".into(),
+            );
+        }
         Action::FinishSetup { skip } => {
             if !skip && !app.dns_owned() {
                 return crate::core::fail(

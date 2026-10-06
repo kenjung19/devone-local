@@ -1,5 +1,78 @@
 # Windows product hardening
 
+## Constrained HTTPS CA and legacy upgrades
+
+The current HTTPS design uses a DEVONE-generated ECDSA P-256 root, a unique
+`DEVONE Local CA <UUID>` subject, approximately ten years of validity, critical
+CA basic constraints with pathLen 1, critical keyCertSign/cRLSign key usage, and
+critical name constraints: permitted dNSName `test`, excluded IPv4 `0.0.0.0/0`
+and IPv6 `::/0`. No managed certificate is requested for localhost or an IP.
+`rcgen = 0.14.10` uses the existing ring backend; no additional crypto backend
+is introduced. Parsing validates constraints and matching public/private keys
+before reuse. Files are published together from a fresh protected staging
+directory; `root.key` is opened with create_new and never overwritten.
+
+The root is `certs/devone-ca/root.crt`; the key is `root.key` in that directory.
+Its protected DACL grants only the current user and SYSTEM full control. This
+does not protect against processes running as the same user. The name constraint
+limits certificates minted with a stolen key; it does not sandbox project code
+or prevent same-user code changing the Windows trust store itself.
+
+Both Setup and site Caddyfiles load the root using `pki { ca local { root { ... } } }`,
+retain skip_install_trust and the Home storage directory. Caddy 2.11.7 was
+checked using its versioned source and its actual validate command: it generated
+an intermediate signed by the supplied root. Windows CertGetCertificateChain
+was tested with exclusive in-memory roots: a constrained root/intermediate
+accepted foo.test (0x0) and rejected example.com (0x4000). The Windows unit test
+uses the production generator parameters and also rejects IP SANs. No user
+trust store is changed by those tests. Modern Edge/Chrome use their own built-in
+verifiers; Chromium's Windows local-root trust configuration explicitly enables
+anchor-constraint enforcement. These checks do not claim browser GUI acceptance.
+
+Legacy migration is an explicit **Upgrade HTTPS certificate authority** action.
+`tls.ca_upgrade` journals phase, exact old/new fingerprints and a validated UUID
+backup identifier. `tls.legacy_ca_fingerprint` retains old ownership while
+`tls.ca_fingerprint` records the replacement before Windows trust mutation.
+The `caddy-local` certificate row is retained for schema compatibility.
+The new root is staged without changing the selected CA. Once migration starts,
+Caddy is stopped; old pki and local leaf caches are moved to a protected backup
+before Caddy regenerates chains. The active marker selects the new root.
+Setup is rewritten; the main Caddyfile is regenerated before site serving resumes.
+Caddy is started when the environment was active, and
+Windows trust is requested. This early cache backup is necessary to regenerate
+intermediate/leaf chains; it is retained permanently after completion rather
+than deleted after the later legacy-trust removal step.
+
+If new trust is cancelled/absent, generated partial caches are preserved and the
+legacy caches, selected root and Caddyfiles are restored. No legacy trust is
+removed. A crash during a switch with no confirmed new trust is rolled back
+before automatic startup on the next launch. If trust succeeded before a crash,
+rerunning Upgrade completes the switch and exact legacy removal. Fingerprint
+mismatches refuse removal. The old root/key and certificates stay under
+`backups/legacy-ca-<UUID>` after success. Recreate generates another constrained
+root and preserves old material under `backups/caddy-ca-<UUID>`.
+
+### Manual verification with an already trusted legacy CA
+
+1. Use a disposable legacy Home with a known recorded CA fingerprint. Confirm a
+   `.test` site opens with that legacy trust, and record the actual Root entry.
+2. Open Settings / HTTPS; check the non-blocking upgrade notice also appears in
+   Sites and Setup. Merely opening these screens must not migrate or show a trust
+   prompt. Choose Upgrade explicitly.
+3. Cancel the Windows prompt once. Verify the original site still uses its legacy
+   chain, its trust remains, and Upgrade remains available. Inspect backups.
+4. Choose Upgrade again and approve only the unique DEVONE root. Verify the new
+   `.test` leaf chains through a fresh Caddy intermediate to the constrained root,
+   new trust is present, and only the exact owned legacy trust entry is gone.
+5. Restart DEVONE, verify sites and trust state, then check a disposable example.com
+   chain is rejected. Inspect critical name constraints in the root certificate.
+6. In a separate disposable Home, interrupt after new trust but before legacy
+   removal; restart and rerun Upgrade. It must complete without adopting another
+   root or deleting unrelated certificates. Test a deliberately mismatched old
+   fingerprint separately: upgrade must fail without removing any trust.
+
+## Historical acceptance evidence
+
 Continues main f18b88d without Phase 4 features, version bumps or locked dependency/toolchain upgrades. Application version remains 0.1.0. No automatic commit/push.
 
 ## Journey review and changes

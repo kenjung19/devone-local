@@ -78,7 +78,7 @@ fn copied_php_and_vite_discover_start_https_and_stop() {
             "running"
         );
         let ca = reqwest::Certificate::from_pem(
-            &std::fs::read(a.home.path("certs/caddy/pki/authorities/local/root.crt")).unwrap(),
+            &std::fs::read(devone::tls::authority::root_path(&a.home)).unwrap(),
         )
         .unwrap();
         let client = reqwest::blocking::Client::builder()

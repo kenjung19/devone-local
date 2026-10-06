@@ -84,6 +84,9 @@ impl Application {
             ))
         })?;
         let store = Store::open(&home.path("devone.db"))?;
+        // Interrupted upgrades with no replacement trust restore the legacy
+        // served chain before any automatic service starts, without a prompt.
+        crate::tls::resume_safe_pending(&store, &home)?;
         crate::tools::migrate_defaults(&store)?;
         crate::tools::tasks::load(&home)?;
         crate::phase3::templates::load(&home)?;
@@ -154,9 +157,14 @@ impl Application {
         if self.active
             && let Err(e) = self.start_required()
         {
-            self.issues.push(e.to_string());
+            self.record_issue(e.to_string());
         }
         Ok(())
+    }
+    pub(crate) fn record_issue(&mut self, issue: String) {
+        if !self.issues.contains(&issue) {
+            self.issues.push(issue);
+        }
     }
     pub fn sites(&self) -> Result<Vec<Site>> {
         let mut stmt=self.store.conn.prepare("SELECT id,name,hostname,project_path,project_type,document_root,present,issue,discovered_at,updated_at,metadata FROM sites ORDER BY name")?;
@@ -276,6 +284,30 @@ impl Application {
             }
         }
         result
+    }
+    pub fn upgrade_ca(&mut self) -> Result<()> {
+        let home = self.home.clone();
+        let store = Store::background(&home.path("devone.db"))?;
+        crate::tls::upgrade(&store, &home, |mode| {
+            match mode {
+                crate::tls::Reload::Stop => {
+                    for item in runtime::installed(&self.store)?
+                        .into_iter()
+                        .filter(|r| r.manifest.runtime == RuntimeType::Caddy)
+                    {
+                        self.supervisor.stop(&self.store, &item.id)?;
+                    }
+                    self.routed.clear();
+                }
+                crate::tls::Reload::Start => {
+                    crate::setup::prepare_ca(&self.store, &self.home)?;
+                    if self.active {
+                        self.start_required()?;
+                    }
+                }
+            }
+            Ok(())
+        })
     }
     pub fn snapshot(&mut self) -> Result<Snapshot> {
         let services = self.supervisor.states(&self.store)?;
@@ -852,6 +884,17 @@ impl Application {
         }
         if let Some(reference) = runtime::default_ref(&self.store, &RuntimeType::Caddy)? {
             let runtime = runtime::find(&self.store, &reference)?;
+            let fresh_start = services
+                .iter()
+                .find(|s| s.key == runtime.id)
+                .is_none_or(|s| s.status == "stopped");
+            if !routes.is_empty()
+                && !self
+                    .supervisor
+                    .may_start_automatically(&runtime.id, fresh_start)
+            {
+                return Ok(());
+            }
             crate::webserver::reconcile(
                 &self.store,
                 &self.home,

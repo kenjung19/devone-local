@@ -735,7 +735,7 @@ fn native_created_next_and_react_vite_run_through_https() {
             panic!("{template}: {error}");
         }
         let ca = reqwest::Certificate::from_pem(
-            &std::fs::read(a.home.path("certs/caddy/pki/authorities/local/root.crt")).unwrap(),
+            &std::fs::read(devone::tls::authority::root_path(&a.home)).unwrap(),
         )
         .unwrap();
         let client = reqwest::blocking::Client::builder()

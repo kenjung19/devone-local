@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Snapshot, Action } from "../contracts";
+import { CaUpgradeNotice } from "./CaUpgradeNotice";
 export function ProductSettings({
   data,
   busy,
@@ -113,6 +114,7 @@ export function ProductSettings({
         <div className="panel-header">
           <h2>HTTPS</h2>
         </div>
+        <CaUpgradeNotice data={data} busy={busy} act={act} />
         <dl>
           <dt>CA</dt>
           <dd>{data.setup.ca_present ? "Created" : "Not created"}</dd>
@@ -146,7 +148,7 @@ export function ProductSettings({
             Remove trust
           </button>
           <button
-            disabled={busy || !data.setup.caddy}
+            disabled={busy || !data.setup.caddy || data.setup.ca_upgrade_pending}
             onClick={() => setConfirmCa(true)}
           >
             Recreate CA…

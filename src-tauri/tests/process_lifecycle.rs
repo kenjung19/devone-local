@@ -106,7 +106,7 @@ fn recovery_is_bounded_and_stop_cancels_retries() {
             Spec {
                 key: "test:retry".into(),
                 binary: fixture(),
-                args: vec!["fail".into()],
+                args: vec!["healthy-then-fail".into()],
                 cwd: d.path().into(),
                 env: Default::default(),
                 port: None,
@@ -115,6 +115,9 @@ fn recovery_is_bounded_and_stop_cancels_retries() {
                 graceful: None,
             },
         )
+        .unwrap();
+    supervisor
+        .wait_healthy(&store, "test:retry", Duration::from_secs(5))
         .unwrap();
     let until = Instant::now() + Duration::from_secs(12);
     loop {
@@ -346,6 +349,35 @@ fn process_alive_health_does_not_admit_an_immediate_worker_failure() {
             .is_err()
     );
     assert!(!supervisor.states(&store).unwrap()[0].healthy);
+    std::thread::sleep(Duration::from_millis(1100));
+    supervisor.reconcile(&store).unwrap();
+    assert!(!supervisor.contains("site:startup:worker"));
+    assert_eq!(
+        std::fs::read_to_string(d.path().join("worker.log"))
+            .unwrap()
+            .matches("failure-output")
+            .count(),
+        1
+    );
+    supervisor
+        .start(
+            &store,
+            Spec {
+                key: "site:startup:worker".into(),
+                binary: fixture(),
+                args: vec!["sleep".into()],
+                cwd: d.path().into(),
+                env: BTreeMap::new(),
+                port: None,
+                log: d.path().join("worker.log"),
+                health: devone::process::HealthStrategy::ProcessAlive,
+                graceful: None,
+            },
+        )
+        .unwrap();
+    supervisor
+        .wait_healthy(&store, "site:startup:worker", Duration::from_secs(5))
+        .unwrap();
     supervisor.stop_all(&store).unwrap();
 }
 

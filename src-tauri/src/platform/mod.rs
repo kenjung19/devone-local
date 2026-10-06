@@ -4,12 +4,25 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command},
 };
+#[cfg(windows)]
+mod ca_security;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(windows)]
 mod windows;
+pub fn harden_ca_path(path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        ca_security::harden(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
 #[cfg(target_os = "linux")]
 use linux as native;
 #[cfg(target_os = "macos")]

@@ -298,7 +298,7 @@ fn native_node_pnpm_static_https_and_reopen() {
         .unwrap();
     assert!(state.healthy);
     assert!(state.port.is_some());
-    let pem = std::fs::read(a.home.path("certs/caddy/pki/authorities/local/root.crt")).unwrap();
+    let pem = std::fs::read(devone::tls::authority::root_path(&a.home)).unwrap();
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
         .add_root_certificate(reqwest::Certificate::from_pem(&pem).unwrap())
@@ -869,7 +869,7 @@ fn native_real_vite_next_and_laravel_vite_protocols() {
     wait_dependencies(&id);
     a.scan().unwrap();
     a.site_action(&id, "start").unwrap();
-    let pem = std::fs::read(a.home.path("certs/caddy/pki/authorities/local/root.crt")).unwrap();
+    let pem = std::fs::read(devone::tls::authority::root_path(&a.home)).unwrap();
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
         .add_root_certificate(reqwest::Certificate::from_pem(&pem).unwrap())
@@ -1011,7 +1011,7 @@ fn native_real_vite_next_and_laravel_vite_protocols() {
     let binary = a.home.runtime("node", "24.21.0").join("node.exe");
     let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hmr-probe.cjs");
     let ws_module = next.join("node_modules/next/dist/compiled/ws");
-    let ca = a.home.path("certs/caddy/pki/authorities/local/root.crt");
+    let ca = devone::tls::authority::root_path(&a.home);
     a.process_action(&id, "web", "start").unwrap();
     let vite_source = get("https://protocol-vite.test/@vite/client");
     let vite_token = vite_source

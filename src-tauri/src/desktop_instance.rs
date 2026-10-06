@@ -79,6 +79,9 @@ impl DesktopInstance {
             while !quitting.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        if stream.set_nonblocking(false).is_err() {
+                            continue;
+                        }
                         let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
                         let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
                         let mut bytes = vec![0; expected.len()];
@@ -158,6 +161,31 @@ impl Drop for DesktopInstance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn activation_waits_for_delayed_and_fragmented_bytes() {
+        let d = tempfile::tempdir().unwrap();
+        let h = Home::new(d.path());
+        let Launch::Primary(owner) = DesktopInstance::claim(&h).unwrap() else {
+            panic!()
+        };
+        let endpoint: Endpoint =
+            serde_json::from_slice(&std::fs::read(h.path("config/desktop-session.json")).unwrap())
+                .unwrap();
+        let mut stream = TcpStream::connect(("127.0.0.1", endpoint.port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(75));
+        stream.write_all(b"activate:").unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        stream
+            .write_all(format!("{}\n", endpoint.token).as_bytes())
+            .unwrap();
+        let mut reply = [0; 2];
+        stream.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"OK");
+        assert!(owner.take_activation());
+    }
     #[test]
     fn explicit_shutdown_cleans_before_owner_is_dropped() {
         let d = tempfile::tempdir().unwrap();

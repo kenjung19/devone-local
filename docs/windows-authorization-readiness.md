@@ -229,3 +229,9 @@ There is no known concrete blocker under the requested development-release
 policy. No automatic commit/push was performed; installer output stays ignored.
 
 READY FOR DAILY USE
+# HTTPS design update
+
+This report is historical acceptance evidence from before the constrained CA
+change. Current root paths, explicit legacy migration and verification are in
+[Windows hardening](windows-hardening.md). Its earlier installer checksums and
+test counts do not certify a newly built constrained-CA installer.
