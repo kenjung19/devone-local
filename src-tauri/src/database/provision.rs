@@ -70,10 +70,12 @@ pub fn provision(
             "Use a non-system database name with 1–63 ASCII letters, digits or underscores",
         );
     }
+    let name = name.to_ascii_lowercase();
+    let name = name.as_str();
     let mut conn = connection(port, "root", "")?;
     let existing = bindings(store)?.into_iter().find(|b| b.site_id == site.id);
     let binding = if let Some(b) = existing {
-        if b.runtime_id != runtime.id || b.database_name != name {
+        if b.runtime_id != runtime.id || !b.database_name.eq_ignore_ascii_case(name) {
             return fail(
                 "This project already has a database binding. Automatic migration/upgrade is not supported.",
             );

@@ -8,7 +8,7 @@ use crate::{
 use mysql::prelude::Queryable;
 use serde::{Deserialize, Serialize};
 use std::{
-    io::Write,
+    io::{Read, Write},
     path::Path,
     process::{Command, Stdio},
     time::{Duration, Instant},
@@ -81,7 +81,7 @@ fn binding(store: &Store, runtime: &str, name: &str) -> Result<Managed> {
     }
     managed(store)?
         .into_iter()
-        .find(|b| b.runtime_id == runtime && b.database_name == name)
+        .find(|b| b.runtime_id == runtime && b.database_name.eq_ignore_ascii_case(name))
         .ok_or_else(|| {
             crate::core::Error::Message("Only DEVONE-managed databases support this action".into())
         })
@@ -107,7 +107,7 @@ pub fn list(app: &mut Application, id: &str) -> Result<Vec<Database>> {
             system: system(&name),
             managed: owned
                 .iter()
-                .any(|b| b.runtime_id == id && b.database_name == name),
+                .any(|b| b.runtime_id == id && b.database_name.eq_ignore_ascii_case(&name)),
             name,
         })
         .collect())
@@ -121,6 +121,20 @@ pub fn create(app: &mut Application, id: &str, name: &str, username: Option<&str
             "Use 1–63 letters, digits or underscores; system database names are forbidden",
         );
     }
+    let name = name.to_ascii_lowercase();
+    let name = name.as_str();
+    if let Some(b) = managed(&app.store)?
+        .into_iter()
+        .find(|b| b.runtime_id == id && b.database_name.eq_ignore_ascii_case(name))
+    {
+        if b.status != "pending" || b.site_id.is_some() {
+            return fail("Database already exists; no adoption or overwrite");
+        }
+        if username.is_some_and(|user| user != b.username) {
+            return fail("Retry must use the pending database's recorded username");
+        }
+        return finish_create(app, &b);
+    }
     let port = port(app, id)?;
     let mut c = super::provision::connection(port, "root", "")?;
     let exists: Option<String> = c
@@ -132,7 +146,7 @@ pub fn create(app: &mut Application, id: &str, name: &str, username: Option<&str
     if exists.is_some()
         || managed(&app.store)?
             .iter()
-            .any(|b| b.runtime_id == id && b.database_name == name)
+            .any(|b| b.runtime_id == id && b.database_name.eq_ignore_ascii_case(name))
     {
         return fail("Database already exists; no adoption or overwrite");
     }
@@ -167,13 +181,41 @@ pub fn create(app: &mut Application, id: &str, name: &str, username: Option<&str
         "INSERT INTO managed_databases VALUES(?1,?2,?3,?4,'pending',?5)",
         rusqlite::params![id, name, user, secret_id, timestamp()],
     )?;
-    c.query_drop(format!("CREATE DATABASE `{name}` CHARACTER SET utf8mb4"))
-        .map_err(sql_error)?;
+    finish_create(
+        app,
+        &Managed {
+            runtime_id: id.into(),
+            database_name: name.into(),
+            username: user.into(),
+            credential_ref: secret_id,
+            site_id: None,
+            status: "pending".into(),
+        },
+    )
+}
+fn finish_create(app: &mut Application, b: &Managed) -> Result<()> {
+    if !valid_database(&b.database_name) || !super::provision::valid_name(&b.username) {
+        return fail("Invalid pending database identity");
+    }
+    let port = port(app, &b.runtime_id)?;
+    let mut c = super::provision::connection(port, "root", "")?;
+    let password = super::provision::secret(&app.home, &b.credential_ref)?;
+    if password.len() != 64 || !password.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return fail("Invalid stored credential");
+    }
+    let name = &b.database_name;
+    let user = &b.username;
     c.query_drop(format!(
-        "CREATE USER '{user}'@'127.0.0.1' IDENTIFIED BY '{}'",
+        "CREATE DATABASE IF NOT EXISTS `{name}` CHARACTER SET utf8mb4"
+    ))
+    .map_err(sql_error)?;
+    c.query_drop(format!(
+        "CREATE USER IF NOT EXISTS '{user}'@'127.0.0.1' IDENTIFIED BY '{}'",
         password.as_str()
     ))
     .map_err(sql_error)?;
+    // Do not grant privileges to an account replaced since the pending record.
+    let _owned = super::provision::connection(port, user, &password)?;
     c.query_drop(format!(
         "GRANT ALL PRIVILEGES ON `{}`.* TO '{user}'@'127.0.0.1'",
         name.replace('_', "\\_")
@@ -181,7 +223,7 @@ pub fn create(app: &mut Application, id: &str, name: &str, username: Option<&str
     .map_err(sql_error)?;
     app.store.conn.execute(
         "UPDATE managed_databases SET status='ready' WHERE runtime_id=?1 AND database_name=?2",
-        [id, name],
+        [&b.runtime_id, name],
     )?;
     Ok(())
 }
@@ -216,7 +258,7 @@ pub fn delete(app: &mut Application, id: &str, name: &str, confirmation: &str) -
     } else {
         app.store.conn.execute(
             "DELETE FROM managed_databases WHERE runtime_id=?1 AND database_name=?2",
-            [id, name],
+            [id, &b.database_name],
         )?;
     }
     // Retain backup artifacts and encrypted credential file for explicit recovery; folder disappearance never calls this.
@@ -265,6 +307,7 @@ fn execute(
     input: Stdio,
     output: Stdio,
     log: &Path,
+    timeout: Duration,
 ) -> Result<()> {
     let password = super::provision::secret(home, &b.credential_ref)?;
     let mut args = vec![
@@ -291,7 +334,7 @@ fn execute(
         let _ = child.wait();
         return Err(e);
     }
-    let end = Instant::now() + Duration::from_secs(120);
+    let end = Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait()? {
             owner.terminate()?;
@@ -356,6 +399,7 @@ pub fn backup(app: &mut Application, id: &str, name: &str) -> Result<Backup> {
         .write(true)
         .create_new(true)
         .open(&temporary)?;
+    let _partial = PartialFile(temporary.clone());
     let result = execute(
         &item,
         &app.home,
@@ -365,7 +409,9 @@ pub fn backup(app: &mut Application, id: &str, name: &str) -> Result<Backup> {
         vec![
             "--single-transaction".into(),
             "--no-tablespaces".into(),
-            "--skip-add-drop-table".into(),
+            "--routines".into(),
+            "--events".into(),
+            "--triggers".into(),
             "--skip-lock-tables".into(),
             "--set-gtid-purged=OFF".into(),
             name.into(),
@@ -373,20 +419,20 @@ pub fn backup(app: &mut Application, id: &str, name: &str) -> Result<Backup> {
         Stdio::null(),
         out.into(),
         &app.home.path("logs/database-backup.log"),
+        Duration::from_secs(30 * 60),
     );
     if let Err(e) = result {
         let _ = std::fs::remove_file(&temporary);
         return Err(e);
     }
-    let bytes = std::fs::read(&temporary)?;
     let backup = Backup {
         id: backup_id,
         r#type: "mysql_sql".into(),
         database: name.into(),
         runtime: id.into(),
         path: file.to_string_lossy().into(),
-        size: bytes.len() as i64,
-        sha256: crate::catalog::digest(&bytes),
+        size: std::fs::metadata(&temporary)?.len() as i64,
+        sha256: file_digest(&temporary)?,
         created_at: timestamp(),
         status: "completed".into(),
     };
@@ -448,7 +494,7 @@ pub fn restore(
     if let Some(known) = backups(&app.store)?
         .into_iter()
         .find(|v| Path::new(&v.path) == path)
-        && crate::catalog::digest(&std::fs::read(path)?) != known.sha256
+        && file_digest(path)? != known.sha256
     {
         return fail("Backup checksum mismatch; restore refused");
     }
@@ -467,12 +513,89 @@ pub fn restore(
         std::fs::File::open(path)?.into(),
         Stdio::null(),
         &app.home.path("logs/database-restore.log"),
+        restore_timeout(std::fs::metadata(path)?.len()),
     )
+}
+fn restore_timeout(size: u64) -> Duration {
+    Duration::from_secs((120 + size.div_ceil(50 * 1024 * 1024) * 60).min(30 * 60))
+}
+struct PartialFile(std::path::PathBuf);
+impl Drop for PartialFile {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.0)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, path=%self.0.display(), "partial backup cleanup failed");
+        }
+    }
+}
+fn file_digest(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(digest
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 #[cfg(test)]
 mod backup_path_tests {
     use super::*;
+    #[test]
+    fn streaming_checksum_timeout_and_partial_cleanup() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("backup.sql.partial");
+        let data = vec![b'x'; 130 * 1024];
+        std::fs::write(&path, &data).unwrap();
+        assert_eq!(file_digest(&path).unwrap(), crate::catalog::digest(&data));
+        assert_eq!(restore_timeout(0), Duration::from_secs(120));
+        assert_eq!(restore_timeout(50 * 1024 * 1024), Duration::from_secs(180));
+        assert_eq!(restore_timeout(512 * 1024 * 1024), Duration::from_secs(780));
+        assert_eq!(
+            restore_timeout(10 * 1024 * 1024 * 1024),
+            Duration::from_secs(1800)
+        );
+        let result: Result<()> = {
+            let _partial = PartialFile(path.clone());
+            fail("checksum or persistence failed")
+        };
+        assert!(result.is_err());
+        assert!(!path.exists());
+    }
+    #[test]
+    fn case_insensitive_pending_create_resumes_without_new_identity() {
+        let d = tempfile::tempdir().unwrap();
+        let mut app = Application::open_with_options(
+            Home::new(d.path()),
+            crate::app::Options {
+                system_setup: false,
+                autostart: false,
+            },
+        )
+        .unwrap();
+        app.store.conn.execute_batch("INSERT INTO runtime_installations VALUES('mysql:8','mysql','8','{}','runtimes/mysql/8',0); INSERT INTO managed_databases VALUES('mysql:8','MixedCase','dv_user','preserved-secret','pending',0);").unwrap();
+        let b = binding(&app.store, "mysql:8", "mixedcase").unwrap();
+        assert_eq!(b.credential_ref, "preserved-secret");
+        let error = create(&mut app, "mysql:8", "MIXEDCASE", None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Start the exact"), "{error}");
+        let error = create(&mut app, "mysql:8", "MIXEDCASE", Some("other"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("recorded username"));
+        assert_eq!(managed(&app.store).unwrap().len(), 1);
+    }
     #[test]
     fn first_backup_creates_directories_and_refuses_junction_without_outside_writes() {
         let temporary = tempfile::tempdir().unwrap();

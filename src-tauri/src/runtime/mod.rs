@@ -311,13 +311,11 @@ pub fn import(
     if target.exists() {
         return fail("Runtime destination already exists; nothing was overwritten");
     }
-    if target.starts_with(&source) {
-        return fail("Import source cannot contain DEVONE runtime destination");
-    }
-    validate_at(&manifest, &source)?;
     let staging = home
         .path("cache")
         .join(format!("import-{}", uuid::Uuid::new_v4()));
+    check_import_source(home, &source, &target, &staging)?;
+    validate_at(&manifest, &source)?;
     let result = (|| {
         copy_tree(&source, &staging).map_err(|e| {
             crate::core::Error::Message(format!("Runtime import copy {}: {e}", source.display()))
@@ -345,13 +343,30 @@ pub fn import(
             relative_path,
             installed_at: timestamp(),
         };
-        store.conn.execute("INSERT INTO runtime_installations(id,kind,version,manifest,relative_path,installed_at) VALUES(?1,?2,?3,?4,?5,?6)",rusqlite::params![id,installation.manifest.runtime.key(),installation.manifest.version,serde_json::to_string(&installation.manifest)?,installation.relative_path,installation.installed_at])?;
+        if let Err(error) = store.conn.execute("INSERT INTO runtime_installations(id,kind,version,manifest,relative_path,installed_at) VALUES(?1,?2,?3,?4,?5,?6)",rusqlite::params![id,installation.manifest.runtime.key(),installation.manifest.version,serde_json::to_string(&installation.manifest)?,installation.relative_path,installation.installed_at]) {
+            rename_runtime(&target, &staging).map_err(|rollback| crate::core::Error::Message(format!("Runtime registration failed: {error}; staging rollback failed: {rollback}")))?;
+            return Err(error.into());
+        }
         Ok(installation)
     })();
     if staging.exists() {
         let _ = std::fs::remove_dir_all(&staging);
     }
     result
+}
+fn check_import_source(home: &Home, source: &Path, target: &Path, staging: &Path) -> Result<()> {
+    let base = home.root().canonicalize()?;
+    for path in [target, staging] {
+        let relative = path
+            .strip_prefix(home.root())
+            .map_err(|_| crate::core::Error::Message("Import destination escapes Home".into()))?;
+        if base.join(relative).starts_with(source) {
+            return fail(
+                "Import source cannot contain DEVONE runtime destination or staging directory",
+            );
+        }
+    }
+    Ok(())
 }
 #[derive(Clone, Serialize, Default)]
 pub struct InstallProgress {
@@ -827,6 +842,40 @@ fn valid_size(v: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn canonical_import_source_cannot_contain_target_or_staging() {
+        let d = tempfile::tempdir().unwrap();
+        let home = Home::new(d.path());
+        home.ensure().unwrap();
+        let target = home.runtime("php", "8.0.0");
+        let staging = home.path("cache/import-test");
+        assert!(
+            check_import_source(
+                &home,
+                &home.root().canonicalize().unwrap(),
+                &target,
+                &staging
+            )
+            .is_err()
+        );
+        assert!(
+            check_import_source(
+                &home,
+                &home.path("cache").canonicalize().unwrap(),
+                &target,
+                &staging
+            )
+            .is_err()
+        );
+        let external = tempfile::tempdir().unwrap();
+        check_import_source(
+            &home,
+            &external.path().canonicalize().unwrap(),
+            &target,
+            &staging,
+        )
+        .unwrap();
+    }
     #[test]
     fn archive_checksum_rejects_corruption() {
         let data = b"trusted archive";

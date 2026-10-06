@@ -353,10 +353,17 @@ pub fn install(
         }
         std::fs::create_dir_all(target.parent().expect("tool parent"))?;
         std::fs::rename(&staging, &target)?;
-        store.conn.execute(
+        if let Err(error) = store.conn.execute(
             "INSERT INTO tools(id,manifest) VALUES(?1,?2)",
             rusqlite::params![format!("{id}:{version}"), serde_json::to_string(&t)?],
-        )?;
+        ) {
+            std::fs::rename(&target, &staging).map_err(|rollback| {
+                crate::core::Error::Message(format!(
+                    "Tool registration failed: {error}; staging rollback failed: {rollback}"
+                ))
+            })?;
+            return Err(error.into());
+        }
         if store.setting(&format!("tool.default.{id}"))?.is_none() {
             store.set_setting(&format!("tool.default.{id}"), version)?;
         }
@@ -618,16 +625,30 @@ pub fn remove(store: &Store, home: &Home, sites: &[Site], id: &str, version: &st
         );
     }
     find(store, home, id, Some(version))?;
-    std::fs::remove_dir_all(home.path(&format!("tools/{id}/{version}")))?;
-    store
+    let root = home.path(&format!("tools/{id}/{version}"));
+    crate::phase3::files::contained(&home.path("tools"), &root)?;
+    let trash = home
+        .path("cache")
+        .join(format!("removed-{}", uuid::Uuid::new_v4()));
+    std::fs::rename(&root, &trash)?;
+    if let Err(error) = store
         .conn
-        .execute("DELETE FROM tools WHERE id=?1", [format!("{id}:{version}")])?;
+        .execute("DELETE FROM tools WHERE id=?1", [format!("{id}:{version}")])
+    {
+        std::fs::rename(&trash, &root).map_err(|rollback| {
+            crate::core::Error::Message(format!(
+                "Tool removal failed: {error}; file rollback failed: {rollback}"
+            ))
+        })?;
+        return Err(error.into());
+    }
     if store.setting(&format!("tool.default.{id}"))?.as_deref() == Some(version) {
         store.conn.execute(
             "DELETE FROM settings WHERE key=?1",
             [format!("tool.default.{id}")],
         )?;
     }
+    std::fs::remove_dir_all(trash)?;
     Ok(())
 }
 
@@ -641,7 +662,6 @@ fn validation_environment() -> BTreeMap<String, String> {
         ),
     ])
 }
-
 fn pnpm_policy(version: &str) -> &'static str {
     if version
         .split('.')
@@ -667,4 +687,45 @@ pub fn migrate_defaults(store: &Store) -> Result<()> {
         }
     }
     store.set_setting("tool.defaults.migrated", "true")
+}
+
+#[cfg(test)]
+mod removal_tests {
+    use super::*;
+    #[test]
+    fn failed_registry_delete_restores_tool_files_for_retry() {
+        let d = tempfile::tempdir().unwrap();
+        let home = Home::new(d.path());
+        home.ensure().unwrap();
+        let store = Store::open(&home.path("state.db")).unwrap();
+        let tool = available().unwrap().remove(0);
+        let root = home.path(&format!("tools/{}/{}", tool.id, tool.version));
+        let entry = root.join(&tool.entry);
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::fs::write(&entry, "verified tool bytes").unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO tools VALUES(?1,?2)",
+                rusqlite::params![
+                    format!("{}:{}", tool.id, tool.version),
+                    serde_json::to_string(&tool).unwrap()
+                ],
+            )
+            .unwrap();
+        store.conn.execute_batch("CREATE TRIGGER reject_delete BEFORE DELETE ON tools BEGIN SELECT RAISE(FAIL,'delete failed'); END;").unwrap();
+        assert!(remove(&store, &home, &[], &tool.id, &tool.version).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&entry).unwrap(),
+            "verified tool bytes"
+        );
+        assert_eq!(installed(&store).unwrap().len(), 1);
+        store
+            .conn
+            .execute_batch("DROP TRIGGER reject_delete;")
+            .unwrap();
+        remove(&store, &home, &[], &tool.id, &tool.version).unwrap();
+        assert!(!root.exists());
+        assert!(installed(&store).unwrap().is_empty());
+    }
 }

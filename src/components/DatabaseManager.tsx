@@ -350,7 +350,7 @@ export function DatabaseManager({
             <p role="alert">
               {target.operation === "delete"
                 ? "This permanently deletes this managed database and its managed user. Backups are retained."
-                : "Only choose SQL you trust. Statements may merge/overwrite data, including DROP statements in the file; errors may leave partial changes. DEVONE does not automatically drop the database. Back up first and stop the project."}
+                : "Only choose SQL you trust. DEVONE backups replace dumped tables and include routines, events and triggers. Restoring may overwrite existing data; errors may leave partial changes. Back up first and stop the project."}
             </p>
             {target.operation === "restore" && (
               <label>

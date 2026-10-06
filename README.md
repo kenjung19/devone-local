@@ -43,7 +43,7 @@ Runtimes shows Installed, Default and Available versions with explicit Install/C
 
 Initialize/start MySQL, then refresh its database list. Managed databases support creation, connection information and manual backups. External and system databases have no destructive actions.
 
-Restore requires trusted SQL and a typed target name. SQL may modify or overwrite existing objects; failures may leave partial changes. Back up first and use a disposable target when verifying a restore. Automatic scheduling and retention deletion are disabled.
+Backups include table drop/create statements, routines, events and triggers, so they can restore over the same managed database. Restore requires trusted SQL and a typed target name. It can replace existing tables/data; failures may leave partial changes. Routine/trigger restoration also depends on the engine's permissions and binary logging configuration; DEVONE does not grant global privileges or change those settings. Back up first and use a disposable target when verifying a restore. Automatic scheduling and retention deletion are disabled.
 
 ## Where data is stored
 

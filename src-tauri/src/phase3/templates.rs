@@ -182,7 +182,7 @@ fn version(v: &str) -> Option<(u32, u32, u32)> {
     }
     Some(result)
 }
-pub fn validate_name(home: &Home, name: &str) -> Result<PathBuf> {
+pub fn validate_name(store: &Store, home: &Home, name: &str) -> Result<PathBuf> {
     if name.is_empty()
         || name.len() > 63
         || !name
@@ -231,6 +231,14 @@ pub fn validate_name(home: &Home, name: &str) -> Result<PathBuf> {
         return fail("www must not be a link");
     }
     let hostname = crate::projects::hostname(name)?;
+    let reserved: bool = store.conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sites WHERE hostname=?1 AND present=1)",
+        [&hostname],
+        |row| row.get(0),
+    )?;
+    if reserved {
+        return fail("Hostname is already used by a present project");
+    }
     for e in std::fs::read_dir(home.www())? {
         let e = e?;
         let existing = e.file_name().to_string_lossy().to_string();
@@ -243,7 +251,7 @@ pub fn validate_name(home: &Home, name: &str) -> Result<PathBuf> {
     Ok(home.www().join(name))
 }
 pub fn validate_request(store: &Store, home: &Home, r: &Request, t: &Template) -> Result<()> {
-    validate_name(home, &r.name)?;
+    validate_name(store, home, &r.name)?;
     let allowed = if t.id == "laravel" {
         vec!["php", "node", "mysql"]
     } else if t.id == "blank-php" {
@@ -365,7 +373,9 @@ fn persist(task: &Task) -> Result<()> {
 }
 fn stage(id: &str, text: &str) -> Result<()> {
     let mut all = jobs().lock().unwrap_or_else(|e| e.into_inner());
-    let j = all.get_mut(id).unwrap();
+    let j = all
+        .get_mut(id)
+        .ok_or_else(|| crate::core::Error::Message("Creation task disappeared".into()))?;
     j.task.stage = text.into();
     persist(&j.task)?;
     let mut log = std::fs::OpenOptions::new()
@@ -479,7 +489,7 @@ pub fn start(
     let task_id = id.clone();
     let home = home.clone();
     std::thread::spawn(move || {
-        let result = create(&home, &r, &t, &task_id, &flag, db_port, smtp);
+        let result = worker_result(|| create(&home, &r, &t, &task_id, &flag, db_port, smtp));
         if let Some(task) = list(&home).into_iter().find(|t| t.id == task_id)
             && let Ok(mut log) = std::fs::OpenOptions::new()
                 .create(true)
@@ -495,26 +505,37 @@ pub fn start(
                 }
             );
         }
-        let mut all = jobs().lock().unwrap_or_else(|e| e.into_inner());
-        let j = all.get_mut(&task_id).unwrap();
-        j.task.status = if result.is_ok() {
-            "completed"
-        } else if flag.load(Ordering::SeqCst) {
-            "cancelled"
-        } else {
-            "failed"
-        }
-        .into();
-        // Preserve the failed/cancelled stage for recovery.
-        if result.is_ok() {
-            j.task.stage = "Completed".into();
-        }
-        j.task.error = result.err().map(|e| e.to_string());
-        if let Err(e) = persist(&j.task) {
-            tracing::error!(error=%e,"creation state persistence failed");
-        }
+        complete_task(&task_id, &flag, result);
     });
     Ok(id)
+}
+fn complete_task(task_id: &str, flag: &AtomicBool, result: Result<()>) {
+    let mut all = jobs().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(j) = all.get_mut(task_id) else {
+        tracing::error!(task=%task_id, "creation task disappeared before completion");
+        return;
+    };
+    j.task.status = if result.is_ok() {
+        "completed"
+    } else if flag.load(Ordering::SeqCst) {
+        "cancelled"
+    } else {
+        "failed"
+    }
+    .into();
+    // Preserve the failed/cancelled stage for recovery.
+    if result.is_ok() {
+        j.task.stage = "Completed".into();
+    }
+    j.task.error = result.err().map(|e| e.to_string());
+    if let Err(e) = persist(&j.task) {
+        tracing::error!(error=%e,"creation state persistence failed");
+    }
+}
+fn worker_result(run: impl FnOnce() -> Result<()>) -> Result<()> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).unwrap_or_else(|_| {
+        fail("Project creation worker panicked; owned staging was preserved or cleaned for retry")
+    })
 }
 fn site(r: &Request, path: &Path) -> Site {
     let metadata = crate::projects::Metadata {
@@ -605,7 +626,7 @@ fn run(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(id)
-        .unwrap()
+        .ok_or_else(|| crate::core::Error::Message("Creation task disappeared".into()))?
         .task
         .log
         .clone();
@@ -857,7 +878,7 @@ fn create(
         crate::phase3::files::cancelled(flag)?;
         stage(id, "Finalizing")?;
         crate::phase3::files::contained(&root, &project)?;
-        let destination = validate_name(home, &r.name)?;
+        let destination = validate_name(&store, home, &r.name)?;
         // Register a disabled site before making the completed folder visible to the watcher.
         // Discovery can then safely race finalization without executing the new project.
         let site_id: String = {
@@ -877,27 +898,42 @@ fn create(
             crate::core::Error::Message("Template document root escaped project".into())
         })?;
         let metadata = crate::projects::metadata::inspect(&project, kind)?;
-        store.conn.execute_batch("BEGIN IMMEDIATE")?;
-        store.conn.execute("INSERT INTO sites(id,name,hostname,project_path,project_type,document_root,present,discovered_at,updated_at,metadata) VALUES(?1,?2,?3,?4,?5,?6,0,?7,?7,?8) ON CONFLICT(project_path) DO UPDATE SET project_type=excluded.project_type,document_root=excluded.document_root,metadata=excluded.metadata",rusqlite::params![site_id,r.name,format!("{}.test",r.name),destination.to_string_lossy(),kind,destination.join(relative_root).to_string_lossy(),timestamp(),serde_json::to_string(&metadata)?])?;
-        store.set_setting(&format!("site.{site_id}.disabled"), "true")?;
+        let mut overrides = Vec::new();
         for (k, v) in &r.runtimes {
             if store.setting(&format!("default.{k}"))?.as_deref() != Some(v) {
-                runtime::override_site(&store, &site_id, &kind_of(k), Some(v))?;
+                overrides.push((k, v));
             }
         }
-        crate::phase3::preferences::update(&store, &site_id, "created")?;
-        store.conn.execute_batch("COMMIT")?;
+        let mut preferences = crate::phase3::preferences::list(&store)?;
+        preferences.entry(site_id.clone()).or_default().created_at = timestamp();
+        let tx = store.conn.transaction()?;
+        crate::projects::reclaim_hostname(
+            &tx,
+            &format!("{}.test", r.name),
+            &destination.to_string_lossy(),
+        )?;
+        tx.execute("INSERT INTO sites(id,name,hostname,project_path,project_type,document_root,present,discovered_at,updated_at,metadata) VALUES(?1,?2,?3,?4,?5,?6,0,?7,?7,?8) ON CONFLICT(project_path) DO UPDATE SET hostname=excluded.hostname,project_type=excluded.project_type,document_root=excluded.document_root,metadata=excluded.metadata",rusqlite::params![site_id,r.name,format!("{}.test",r.name),destination.to_string_lossy(),kind,destination.join(relative_root).to_string_lossy(),timestamp(),serde_json::to_string(&metadata)?])?;
+        tx.execute("INSERT INTO settings(key,value) VALUES(?1,'true') ON CONFLICT(key) DO UPDATE SET value=excluded.value", [format!("site.{site_id}.disabled")])?;
+        for (k, v) in overrides {
+            tx.execute("INSERT INTO site_runtime_overrides(site_id,kind,version) VALUES(?1,?2,?3) ON CONFLICT(site_id,kind) DO UPDATE SET version=excluded.version", rusqlite::params![site_id,k,v])?;
+        }
+        tx.execute("INSERT INTO settings(key,value) VALUES('sites.preferences',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [serde_json::to_string(&preferences)?])?;
+        tx.commit()?;
         std::fs::rename(&project, &destination)?;
         {
             let mut all = jobs().lock().unwrap_or_else(|e| e.into_inner());
-            let j = all.get_mut(id).unwrap();
+            let j = all
+                .get_mut(id)
+                .ok_or_else(|| crate::core::Error::Message("Creation task disappeared".into()))?;
             j.task.destination = Some(destination.to_string_lossy().into());
             persist(&j.task)?;
         }
         crate::projects::scan(&mut store, &home.www())?;
         {
             let mut all = jobs().lock().unwrap_or_else(|e| e.into_inner());
-            let j = all.get_mut(id).unwrap();
+            let j = all
+                .get_mut(id)
+                .ok_or_else(|| crate::core::Error::Message("Creation task disappeared".into()))?;
             j.task.site_id = Some(site_id.clone());
             persist(&j.task)?;
         }
@@ -1005,10 +1041,90 @@ fn create(
         }
         Ok(())
     })();
-    let cleanup = crate::phase3::files::cleanup(&root, &stage_path);
-    match (result, cleanup) {
-        (Err(e), _) => Err(e),
-        (Ok(()), Err(e)) => Err(e),
-        (Ok(()), Ok(())) => Ok(()),
+    cleanup_creation(result, &root, &stage_path)
+}
+fn cleanup_creation(result: Result<()>, root: &Path, staging: &Path) -> Result<()> {
+    if let Err(error) = crate::phase3::files::cleanup(root, staging) {
+        tracing::warn!(%error, "project staging cleanup failed; creation result retained");
+    }
+    result
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cleanup_failure_does_not_turn_completed_creation_into_failure() {
+        let d = tempfile::tempdir().unwrap();
+        let staging = d.path().join("staging");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("retained"), "data").unwrap();
+        let other = tempfile::tempdir().unwrap();
+        cleanup_creation(Ok(()), other.path(), &staging).unwrap();
+        assert!(staging.join("retained").exists());
+        assert!(
+            cleanup_creation(fail("generation failed"), other.path(), &staging)
+                .unwrap_err()
+                .to_string()
+                .contains("generation failed")
+        );
+    }
+    #[test]
+    fn database_hostname_conflict_is_rejected_before_creation() {
+        let d = tempfile::tempdir().unwrap();
+        let home = Home::new(d.path());
+        home.ensure().unwrap();
+        let mut store = Store::open(&home.path("state.db")).unwrap();
+        std::fs::create_dir(home.www().join("other")).unwrap();
+        crate::projects::scan(&mut store, &home.www()).unwrap();
+        store
+            .conn
+            .execute("UPDATE sites SET hostname='reserved.test'", [])
+            .unwrap();
+        assert!(
+            validate_name(&store, &home, "reserved")
+                .unwrap_err()
+                .to_string()
+                .contains("Hostname")
+        );
+        store
+            .conn
+            .execute("UPDATE sites SET present=0", [])
+            .unwrap();
+        validate_name(&store, &home, "reserved").unwrap();
+    }
+    #[test]
+    fn panicking_worker_reaches_failed_state_and_releases_home() {
+        let d = tempfile::tempdir().unwrap();
+        let home = Home::new(d.path());
+        home.ensure().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let flag = Arc::new(AtomicBool::new(false));
+        let task = Task {
+            id: id.clone(),
+            template: "blank".into(),
+            project_name: "project".into(),
+            status: "running".into(),
+            stage: "Creating".into(),
+            log: home.path("logs/creation.log").to_string_lossy().into(),
+            error: None,
+            created_at: timestamp(),
+            site_id: None,
+            destination: None,
+        };
+        jobs().lock().unwrap_or_else(|e| e.into_inner()).insert(
+            id.clone(),
+            Job {
+                task,
+                cancel: flag.clone(),
+                home: home.root().into(),
+            },
+        );
+        assert!(active(&home));
+        complete_task(&id, &flag, worker_result(|| panic!("worker fault")));
+        assert!(!active(&home));
+        let task = list(&home).remove(0);
+        assert_eq!(task.status, "failed");
+        assert!(task.error.unwrap().contains("panicked"));
+        assert!(stage("missing-task", "next").is_err());
     }
 }

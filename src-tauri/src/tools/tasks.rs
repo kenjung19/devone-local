@@ -54,22 +54,21 @@ pub fn start(site: &str, manager: &str, spec: Spec) -> Result<()> {
         return fail("A dependency installation is already running for this site");
     }
     let cancel = Arc::new(AtomicBool::new(false));
+    let task = Task {
+        site_id: site.into(),
+        manager: manager.into(),
+        status: "running".into(),
+        log: spec.log.to_string_lossy().into(),
+        error: None,
+    };
+    persist(&task)?;
     guard.insert(
         site.into(),
         Entry {
-            task: Task {
-                site_id: site.into(),
-                manager: manager.into(),
-                status: "running".into(),
-                log: spec.log.to_string_lossy().into(),
-                error: None,
-            },
+            task,
             cancel: cancel.clone(),
         },
     );
-    if let Some(e) = guard.get(site) {
-        persist(&e.task)?;
-    }
     let site = site.to_owned();
     drop(guard);
     std::thread::spawn(move || {
@@ -188,5 +187,27 @@ pub fn cancel_home(home: &crate::config::Home) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while list_home(home).iter().any(|t| t.status == "running") && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn failed_initial_persist_does_not_leave_running_entry() {
+        let d = tempfile::tempdir().unwrap();
+        let site = uuid::Uuid::new_v4().to_string();
+        let spec = Spec {
+            key: site.clone(),
+            binary: d.path().join("never-spawned"),
+            args: vec![],
+            cwd: d.path().into(),
+            env: BTreeMap::new(),
+            port: None,
+            log: d.path().join("missing/task.log"),
+            health: crate::process::HealthStrategy::ProcessAlive,
+            graceful: None,
+        };
+        assert!(start(&site, "pnpm", spec).is_err());
+        assert!(!list().iter().any(|t| t.site_id == site));
     }
 }

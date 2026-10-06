@@ -72,12 +72,15 @@ fn project_names_registry_requirements_and_existing_discovery_are_safe() {
         "upperCase",
         "space name",
     ] {
-        assert!(templates::validate_name(&a.home, name).is_err(), "{name}");
+        assert!(
+            templates::validate_name(&a.store, &a.home, name).is_err(),
+            "{name}"
+        );
     }
     std::fs::create_dir(a.home.www().join("Clash")).unwrap();
-    assert!(templates::validate_name(&a.home, "clash").is_err());
+    assert!(templates::validate_name(&a.store, &a.home, "clash").is_err());
     std::fs::create_dir(a.home.www().join("my app")).unwrap();
-    assert!(templates::validate_name(&a.home, "my-app").is_err());
+    assert!(templates::validate_name(&a.store, &a.home, "my-app").is_err());
     let t = templates.iter().find(|t| t.id == "laravel").unwrap();
     assert!(
         templates::validate_request(&a.store, &a.home, &request("new-app", "laravel"), t).is_err()
@@ -323,6 +326,25 @@ fn import_php(a: &mut Application) {
     }
 }
 #[test]
+#[ignore = "Requires explicit trusted PHP fixture"]
+fn native_import_registration_failure_can_be_retried() {
+    let source = std::env::var("DEVONE_PHASE3_PHP").expect("Set DEVONE_PHASE3_PHP");
+    let d = tempfile::tempdir().unwrap();
+    let mut a = app(d.path());
+    let manifest = runtime::inspect_import(RuntimeType::Php, Path::new(&source)).unwrap();
+    let target = a.home.runtime("php", &manifest.version);
+    a.store.conn.execute_batch("CREATE TRIGGER reject_import BEFORE INSERT ON runtime_installations BEGIN SELECT RAISE(FAIL,'registry failed'); END;").unwrap();
+    assert!(a.import(manifest.clone(), Path::new(&source)).is_err());
+    assert!(!target.exists());
+    assert!(runtime::installed(&a.store).unwrap().is_empty());
+    a.store
+        .conn
+        .execute_batch("DROP TRIGGER reject_import;")
+        .unwrap();
+    a.import(manifest, Path::new(&source)).unwrap();
+    assert!(target.is_dir());
+}
+#[test]
 #[ignore = "Requires explicit PHP fixture and optional selected Composer/network for Laravel"]
 fn native_blank_php_creation() {
     let d = tempfile::tempdir().unwrap();
@@ -370,7 +392,7 @@ fn native_database_backup_restore_and_delete_preserve_unrelated_data() {
     let manifest = runtime::inspect_import(RuntimeType::Mysql, Path::new(&source)).unwrap();
     let item = a.import(manifest, Path::new(&source)).unwrap();
     devone::database::start(&a.store, &a.home, &mut a.supervisor, &item).unwrap();
-    devone::database::admin::create(&mut a, &item.id, "backup_test", None).unwrap();
+    devone::database::admin::create(&mut a, &item.id, "Backup_Test", None).unwrap();
     let managed = devone::database::admin::managed(&a.store)
         .unwrap()
         .remove(0);
@@ -383,6 +405,32 @@ fn native_database_backup_restore_and_delete_preserve_unrelated_data() {
             |r| r.get(0),
         )
         .unwrap();
+    // This disposable instance enables trigger/routine creation under binary logging.
+    // Production restore still depends on the selected engine's permissions/configuration.
+    let mut administrator = Conn::new(
+        OptsBuilder::new()
+            .ip_or_hostname(Some("127.0.0.1"))
+            .tcp_port(port)
+            .user(Some("root"))
+            .prefer_socket(false),
+    )
+    .unwrap();
+    administrator
+        .query_drop("SET GLOBAL log_bin_trust_function_creators=1")
+        .unwrap();
+    a.store
+        .conn
+        .execute(
+            "UPDATE managed_databases SET status='pending' WHERE runtime_id=?1",
+            [&item.id],
+        )
+        .unwrap();
+    devone::database::admin::create(&mut a, &item.id, "BACKUP_TEST", None).unwrap();
+    let resumed = devone::database::admin::managed(&a.store)
+        .unwrap()
+        .remove(0);
+    assert_eq!(resumed.credential_ref, managed.credential_ref);
+    assert_eq!(resumed.status, "ready");
     let secret = devone::database::provision::secret(&a.home, &managed.credential_ref).unwrap();
     let mut connection = Conn::new(
         OptsBuilder::new()
@@ -408,6 +456,11 @@ fn native_database_backup_restore_and_delete_preserve_unrelated_data() {
     let list = devone::database::admin::list(&mut a, &item.id).unwrap();
     assert!(list.iter().any(|d| d.name == "mysql" && d.system));
     assert!(list.iter().any(|d| d.name == "backup_test" && d.managed));
+    connection
+        .query_drop("CREATE PROCEDURE acceptance_routine() SELECT 'routine value'")
+        .unwrap();
+    connection.query_drop("CREATE EVENT acceptance_event ON SCHEDULE EVERY 1 DAY STARTS CURRENT_TIMESTAMP + INTERVAL 1 DAY DO SET @devone_event=1").unwrap();
+    connection.query_drop("CREATE TRIGGER acceptance_trigger BEFORE INSERT ON acceptance FOR EACH ROW SET NEW.value=CONCAT(NEW.value,' trigger')").unwrap();
     let backup = devone::database::admin::backup(&mut a, &item.id, "backup_test").unwrap();
     assert!(backup.size > 0);
     assert!(Path::new(&backup.path).starts_with(a.home.path("backups/mysql/backup_test")));
@@ -415,7 +468,15 @@ fn native_database_backup_restore_and_delete_preserve_unrelated_data() {
         devone::catalog::digest(&std::fs::read(&backup.path).unwrap()),
         backup.sha256
     );
-    connection.query_drop("DROP TABLE acceptance").unwrap();
+    connection
+        .query_drop("UPDATE acceptance SET value='changed value'")
+        .unwrap();
+    connection
+        .query_drop("DROP PROCEDURE acceptance_routine")
+        .unwrap();
+    connection
+        .query_drop("DROP EVENT acceptance_event")
+        .unwrap();
     devone::database::admin::restore(
         &mut a,
         &item.id,
@@ -428,6 +489,17 @@ fn native_database_backup_restore_and_delete_preserve_unrelated_data() {
         .query_first("SELECT value FROM acceptance WHERE id=1")
         .unwrap();
     assert_eq!(value.as_deref(), Some("saved value"));
+    let routine: Option<String> = connection.query_first("CALL acceptance_routine()").unwrap();
+    assert_eq!(routine.as_deref(), Some("routine value"));
+    let events: Vec<mysql::Row> = connection.query("SHOW EVENTS").unwrap();
+    assert_eq!(events.len(), 1);
+    connection
+        .query_drop("INSERT INTO acceptance VALUES(2,'new')")
+        .unwrap();
+    let triggered: Option<String> = connection
+        .query_first("SELECT value FROM acceptance WHERE id=2")
+        .unwrap();
+    assert_eq!(triggered.as_deref(), Some("new trigger"));
     let original = std::fs::read(&backup.path).unwrap();
     std::fs::write(&backup.path, b"changed").unwrap();
     assert!(

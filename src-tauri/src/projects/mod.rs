@@ -143,9 +143,18 @@ pub fn scan(store: &mut Store, www: &Path) -> Result<Discovery> {
     }
     let tx = store.conn.transaction()?;
     tx.execute("UPDATE sites SET present=0", [])?;
+    for (_, _, path, _, _, _) in &detected {
+        tx.execute(
+            "UPDATE sites SET present=1 WHERE project_path=?1",
+            [path.to_string_lossy().as_ref()],
+        )?;
+    }
     for (name, host, path, kind, root, meta) in &detected {
         let path = path.to_string_lossy().to_string();
         let root = root.to_string_lossy().to_string();
+        if hosts[host] == 1 {
+            reclaim_hostname(&tx, host, &path)?;
+        }
         let existing: Option<String> = {
             use rusqlite::OptionalExtension;
             tx.query_row(
@@ -163,7 +172,7 @@ pub fn scan(store: &mut Store, www: &Path) -> Result<Discovery> {
             tx.execute("UPDATE sites SET present=1,issue='Hostname conflict',updated_at=?2 WHERE project_path=?1", rusqlite::params![path,timestamp()])?;
             continue;
         }
-        tx.execute("INSERT INTO sites(id,name,hostname,project_path,project_type,document_root,present,discovered_at,updated_at,metadata) VALUES(?1,?2,?3,?4,?5,?6,1,?7,?7,?8) ON CONFLICT(project_path) DO UPDATE SET name=excluded.name,project_type=excluded.project_type,document_root=excluded.document_root,present=1,issue=NULL,updated_at=excluded.updated_at,metadata=excluded.metadata",
+        tx.execute("INSERT INTO sites(id,name,hostname,project_path,project_type,document_root,present,discovered_at,updated_at,metadata) VALUES(?1,?2,?3,?4,?5,?6,1,?7,?7,?8) ON CONFLICT(project_path) DO UPDATE SET name=excluded.name,hostname=excluded.hostname,project_type=excluded.project_type,document_root=excluded.document_root,present=1,issue=NULL,updated_at=excluded.updated_at,metadata=excluded.metadata",
    rusqlite::params![uuid::Uuid::new_v4().to_string(),name,host,path,kind,root,timestamp(),serde_json::to_string(meta)?])?;
     }
     tx.commit()?;
@@ -172,9 +181,65 @@ pub fn scan(store: &mut Store, www: &Path) -> Result<Discovery> {
         issues,
     })
 }
+pub(crate) fn reclaim_hostname(
+    conn: &rusqlite::Connection,
+    hostname: &str,
+    path: &str,
+) -> Result<()> {
+    // Preserve removed project records and database bindings, releasing only the URL.
+    conn.execute("UPDATE sites SET hostname='removed-' || id || '.test' WHERE hostname=?1 AND present=0 AND project_path<>?2", [hostname, path])?;
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn missing_project_releases_hostname_without_erasing_binding() {
+        let d = tempfile::tempdir().unwrap();
+        let www = d.path().join("www");
+        std::fs::create_dir_all(www.join("a_b")).unwrap();
+        let mut store = Store::open(&d.path().join("db")).unwrap();
+        scan(&mut store, &www).unwrap();
+        let old_id: String = store
+            .conn
+            .query_row("SELECT id FROM sites", [], |r| r.get(0))
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO site_runtime_overrides VALUES(?1,'php','8')",
+                [&old_id],
+            )
+            .unwrap();
+        std::fs::remove_dir(www.join("a_b")).unwrap();
+        std::fs::create_dir(www.join("a-b")).unwrap();
+        assert!(scan(&mut store, &www).unwrap().issues.is_empty());
+        let present: bool = store
+            .conn
+            .query_row(
+                "SELECT present FROM sites WHERE hostname='a-b.test'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(present);
+        let old_host: String = store
+            .conn
+            .query_row("SELECT hostname FROM sites WHERE id=?1", [&old_id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(old_host.starts_with("removed-"));
+        let count: i64 = store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM site_runtime_overrides WHERE site_id=?1",
+                [&old_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
     #[test]
     fn hostnames_are_safe_and_conflicts_visible() {
         assert_eq!(hostname("My App_1").unwrap(), "my-app-1.test");
