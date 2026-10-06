@@ -126,6 +126,7 @@ impl Resolver {
             }),
         ];
         tracing::info!(port, "wildcard DNS started");
+        invalidate_health(port);
         Ok(Self {
             stop,
             workers,
@@ -133,8 +134,40 @@ impl Resolver {
         })
     }
     pub fn healthy(&self) -> bool {
-        probe(self.port).is_ok()
+        cached_health(self.port)
     }
+}
+type HealthCache = std::collections::BTreeMap<u16, (std::time::Instant, bool)>;
+fn health_cache() -> &'static std::sync::Mutex<HealthCache> {
+    static HEALTH: std::sync::OnceLock<std::sync::Mutex<HealthCache>> = std::sync::OnceLock::new();
+    HEALTH.get_or_init(Default::default)
+}
+fn cached_probe(
+    cache: &mut HealthCache,
+    port: u16,
+    now: std::time::Instant,
+    probe: impl FnOnce() -> bool,
+) -> bool {
+    if let Some((at, healthy)) = cache.get(&port)
+        && now.duration_since(*at) < Duration::from_secs(5)
+    {
+        return *healthy;
+    }
+    let healthy = probe();
+    cache.insert(port, (now, healthy));
+    healthy
+}
+fn invalidate_health(port: u16) {
+    health_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&port);
+}
+pub fn cached_health(port: u16) -> bool {
+    let mut cache = health_cache().lock().unwrap_or_else(|e| e.into_inner());
+    cached_probe(&mut cache, port, std::time::Instant::now(), || {
+        probe(port).is_ok()
+    })
 }
 pub fn probe(port: u16) -> Result<()> {
     let mut q = vec![0x44, 0x31, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
@@ -179,12 +212,38 @@ impl Drop for Resolver {
         for w in self.workers.drain(..) {
             let _ = w.join();
         }
+        invalidate_health(self.port);
         tracing::info!("wildcard DNS stopped");
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn health_cache_reuses_result_until_ttl_then_recovers() {
+        let mut cache = HealthCache::new();
+        let now = std::time::Instant::now();
+        assert!(!cached_probe(&mut cache, 53, now, || false));
+        assert!(!cached_probe(
+            &mut cache,
+            53,
+            now + Duration::from_secs(4),
+            || panic!("cached")
+        ));
+        assert!(cached_probe(
+            &mut cache,
+            53,
+            now + Duration::from_secs(5),
+            || true
+        ));
+        assert!(cached_probe(
+            &mut cache,
+            53,
+            now + Duration::from_secs(6),
+            || panic!("cached")
+        ));
+        assert!(!cached_probe(&mut cache, 54, now, || false));
+    }
     #[test]
     fn all_managed_and_unrelated_questions_work_over_udp_and_tcp_and_stop_cleanly() {
         let resolver = Resolver::start(0).unwrap();

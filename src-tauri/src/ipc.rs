@@ -706,7 +706,195 @@ fn lock(state: &Shared) -> Result<std::sync::MutexGuard<'_, Application>> {
 /// Shared application command boundary for Tauri and explicit acceptance clients.
 pub fn execute_shared(state: &Shared, action: Action) -> Result<Response> {
     let mut app = lock(state)?;
+    if app.operation_busy {
+        return crate::core::fail(
+            "Another environment operation is running; wait for it to finish",
+        );
+    }
+    if let Action::SiteProcess {
+        site_id,
+        process_id,
+        operation,
+    } = &action
+        && matches!(operation.as_str(), "start" | "restart")
+    {
+        let (site, process) = app.prepare_process_start(site_id, process_id, operation)?;
+        app.operation_busy = true;
+        drop(app);
+        let _operation = Operation(state.clone());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let result = loop {
+            let mut app = lock(state)?;
+            let Application {
+                supervisor, store, ..
+            } = &mut *app;
+            match supervisor.healthy_once(store, &process.key) {
+                Ok(true) => break Ok(()),
+                Err(error) => break Err(error),
+                Ok(false) if std::time::Instant::now() >= deadline => {
+                    break crate::core::fail(format!(
+                        "{} did not become healthy within 60 seconds",
+                        process.key
+                    ));
+                }
+                Ok(false) => {}
+            }
+            drop(app);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
+        let mut app = lock(state)?;
+        app.finish_project_health(&site, &process, result)?;
+        app.commit_process_start(&site, process_id)?;
+        return Ok(Response {
+            snapshot: app.snapshot()?,
+            message: None,
+        });
+    }
+    if matches!(
+        action,
+        Action::Install { .. }
+            | Action::Import { .. }
+            | Action::InstallTool { .. }
+            | Action::Dns
+            | Action::RemoveDns
+            | Action::PrepareCa
+            | Action::Trust
+            | Action::RemoveTrust
+            | Action::UpgradeCa
+            | Action::RecreateCa { .. }
+            | Action::RemoteCatalog { .. }
+            | Action::RefreshCatalog
+    ) {
+        let home = app.home.clone();
+        if matches!(action, Action::Dns | Action::RemoveDns) {
+            app.prepare_dns(matches!(action, Action::RemoveDns))?;
+        }
+        if matches!(action, Action::RecreateCa { confirmed: false }) {
+            return crate::core::fail("Confirm CA recreation first");
+        }
+        if matches!(action, Action::RecreateCa { .. }) {
+            app.stop_ca_routes()?;
+        }
+        app.operation_busy = true;
+        drop(app);
+        let _operation = Operation(state.clone());
+        let store = crate::storage::Store::background(&home.path("devone.db"))?;
+        let message = run_unlocked(state, &store, &home, action)?;
+        return Ok(Response {
+            snapshot: lock(state)?.snapshot()?,
+            message,
+        });
+    }
     apply(&mut app, action)
+}
+// Keep mutations serialized while snapshots, discovery and shutdown can acquire
+// the core lock during a download or OS prompt. Also release on errors/panics.
+struct Operation(Shared);
+impl Drop for Operation {
+    fn drop(&mut self) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .operation_busy = false;
+    }
+}
+fn run_unlocked(
+    state: &Shared,
+    store: &crate::storage::Store,
+    home: &crate::config::Home,
+    action: Action,
+) -> Result<Option<String>> {
+    let mut message = None;
+    match action {
+        Action::Install { runtime } => {
+            let item = runtime::install(store, home, &runtime)?;
+            let app = lock(state)?;
+            if runtime::default_ref(&app.store, &item.manifest.runtime)?.is_none() {
+                runtime::set_default(&app.store, &item.reference())?;
+            }
+        }
+        Action::Import { manifest, source } => {
+            let item = runtime::import(store, home, manifest, Path::new(&source))?;
+            let app = lock(state)?;
+            if runtime::default_ref(&app.store, &item.manifest.runtime)?.is_none() {
+                runtime::set_default(&app.store, &item.reference())?;
+            }
+        }
+        Action::InstallTool { id, version, node } => {
+            crate::tools::install(store, home, &id, &version, node.as_deref())?
+        }
+        Action::Dns | Action::RemoveDns => {
+            crate::platform::setup_wildcard(matches!(action, Action::RemoveDns))?;
+            lock(state)?.finish_dns();
+        }
+        Action::PrepareCa => crate::setup::prepare_ca(store, home)?,
+        Action::Trust => {
+            let already_trusted = crate::platform::ca_trusted(&crate::tls::CaddyTls.ca_path(home));
+            crate::tls::CaddyTls.trust(store, home)?;
+            message = Some(
+                if already_trusted {
+                    "This exact DEVONE CA is already trusted. HTTPS trust state refreshed."
+                } else {
+                    "This exact DEVONE CA is trusted for the current Windows user."
+                }
+                .into(),
+            );
+        }
+        Action::RemoveTrust => crate::tls::remove_trust(store, home)?,
+        Action::UpgradeCa => {
+            crate::tls::upgrade(store, home, |mode| match mode {
+                crate::tls::Reload::Stop => lock(state)?.stop_ca_routes(),
+                crate::tls::Reload::Start => {
+                    crate::setup::prepare_ca(store, home)?;
+                    lock(state)?.resume_ca_routes()
+                }
+            })?;
+            lock(state)?.finish_ca_upgrade();
+            message = Some(
+                "HTTPS CA upgraded to .test-only trust; legacy CA is preserved in backups.".into(),
+            );
+        }
+        Action::RecreateCa { confirmed } => {
+            crate::tls::recreate(store, home, confirmed)?;
+            lock(state)?.resume_ca_routes()?;
+            message = Some(
+                "New CA created. Install its trust again; old CA data is preserved in backups."
+                    .into(),
+            );
+        }
+        Action::RemoteCatalog { url, sha256 } => {
+            crate::catalog::refresh_source(
+                store,
+                crate::catalog::Source::Remote {
+                    url: &url,
+                    sha256: &sha256,
+                },
+            )?;
+            store.set_setting("catalog.remote.url", &url)?;
+            store.set_setting("catalog.remote.sha256", &sha256)?;
+        }
+        Action::RefreshCatalog => {
+            if let (Some(url), Some(sha256)) = (
+                store.setting("catalog.remote.url")?,
+                store.setting("catalog.remote.sha256")?,
+            ) {
+                crate::catalog::refresh_source(
+                    store,
+                    crate::catalog::Source::Remote {
+                        url: &url,
+                        sha256: &sha256,
+                    },
+                )?;
+            } else {
+                crate::catalog::refresh(store, &home.path("config/runtime-catalog.json"))?;
+            }
+        }
+        _ => return crate::core::fail("Unsupported background operation"),
+    }
+    Ok(message)
+}
+pub fn shutdown_shared(state: &Shared) -> Result<()> {
+    state.lock().unwrap_or_else(|e| e.into_inner()).shutdown()
 }
 pub fn validate_sql_selection(value: Option<String>) -> Result<Option<String>> {
     if let Some(path) = &value {
@@ -875,5 +1063,71 @@ mod sql_selection_tests {
         assert!(validate_sql_selection(Some(value)).is_err());
         assert!(validate_sql_selection(Some("relative.sql".into())).is_err());
         assert_eq!(std::fs::read(unsupported).unwrap(), bytes);
+    }
+}
+
+#[cfg(test)]
+mod locking_tests {
+    use super::*;
+    fn application() -> (tempfile::TempDir, Shared) {
+        let root = tempfile::tempdir().unwrap();
+        let app = Application::open_with_options(
+            crate::config::Home::new(root.path()),
+            crate::app::Options {
+                system_setup: false,
+                autostart: false,
+            },
+        )
+        .unwrap();
+        (root, Arc::new(Mutex::new(app)))
+    }
+    #[test]
+    fn pending_operation_allows_snapshot_and_shutdown_and_clears_on_error() {
+        let (_root, shared) = application();
+        let worker = shared.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            lock(&worker).unwrap().operation_busy = true;
+            let _operation = Operation(worker);
+            ready_tx.send(()).unwrap();
+            done_rx.recv().unwrap();
+        });
+        ready_rx.recv().unwrap();
+        assert!(shared.try_lock().unwrap().snapshot().is_ok());
+        assert!(execute_shared(&shared, Action::Scan).is_err());
+        shutdown_shared(&shared).unwrap();
+        done_tx.send(()).unwrap();
+        thread.join().unwrap();
+        assert!(!lock(&shared).unwrap().operation_busy);
+        assert!(
+            execute_shared(
+                &shared,
+                Action::Install {
+                    runtime: RuntimeRef {
+                        kind: RuntimeType::Php,
+                        version: "not-in-catalog".into()
+                    }
+                }
+            )
+            .is_err()
+        );
+        assert!(!lock(&shared).unwrap().operation_busy);
+    }
+    #[test]
+    fn poisoned_state_still_shuts_down() {
+        let (_root, shared) = application();
+        let worker = shared.clone();
+        assert!(
+            std::thread::spawn(move || {
+                let mut app = worker.lock().unwrap();
+                app.active = true;
+                panic!("poison fixture");
+            })
+            .join()
+            .is_err()
+        );
+        shutdown_shared(&shared).unwrap();
+        assert!(!shared.lock().unwrap_or_else(|e| e.into_inner()).active);
     }
 }

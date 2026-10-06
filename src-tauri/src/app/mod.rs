@@ -62,6 +62,8 @@ pub struct Application {
     routed: BTreeMap<String, String>,
     paused: BTreeSet<String>,
     ca_blocked: bool,
+    pub(crate) operation_busy: bool,
+    last_routes: Option<std::time::Instant>,
 }
 impl Application {
     pub fn open(home: Home) -> Result<Self> {
@@ -107,6 +109,8 @@ impl Application {
             routed: BTreeMap::new(),
             paused: BTreeSet::new(),
             ca_blocked: ca_error.is_some(),
+            operation_busy: false,
+            last_routes: None,
         };
         if let Some(error) = ca_error {
             tracing::error!(%error, "HTTPS CA startup recovery failed");
@@ -135,17 +139,24 @@ impl Application {
         Ok(app)
     }
     pub fn setup_dns(&mut self, remove: bool) -> Result<()> {
+        self.prepare_dns(remove)?;
+        crate::platform::setup_wildcard(remove)?;
+        self.finish_dns();
+        Ok(())
+    }
+    pub(crate) fn prepare_dns(&mut self, remove: bool) -> Result<()> {
         if !remove && self._dns.as_ref().is_none_or(|r| !r.healthy()) {
             self._dns = None;
             self._dns = Some(crate::dns::server::Resolver::start(53)?);
         }
-        crate::platform::setup_wildcard(remove)?;
+        Ok(())
+    }
+    pub(crate) fn finish_dns(&mut self) {
         self.issues.retain(|i| {
             !i.starts_with("DNS UDP ")
                 && !i.starts_with("DNS TCP ")
                 && !i.starts_with("Wildcard DNS setup required")
         });
-        Ok(())
     }
     pub fn scan(&mut self) -> Result<()> {
         let result = crate::projects::scan(&mut self.store, &self.home.www())?;
@@ -273,6 +284,29 @@ impl Application {
     pub fn dns_owned(&self) -> bool {
         self._dns.as_ref().is_some_and(|r| r.healthy())
     }
+    pub(crate) fn stop_ca_routes(&mut self) -> Result<()> {
+        self.ca_blocked = true;
+        for item in runtime::installed(&self.store)?
+            .into_iter()
+            .filter(|r| r.manifest.runtime == RuntimeType::Caddy)
+        {
+            self.supervisor.stop(&self.store, &item.id)?;
+        }
+        self.routed.clear();
+        Ok(())
+    }
+    pub(crate) fn resume_ca_routes(&mut self) -> Result<()> {
+        self.ca_blocked = false;
+        if self.active {
+            self.start_required()?;
+        }
+        Ok(())
+    }
+    pub(crate) fn finish_ca_upgrade(&mut self) {
+        self.ca_blocked = false;
+        self.issues
+            .retain(|i| !i.starts_with("HTTPS CA upgrade could not be rolled back automatically:"));
+    }
     pub fn recreate_ca(&mut self, confirmed: bool) -> Result<()> {
         if !confirmed {
             return fail("Confirm CA recreation first");
@@ -332,7 +366,13 @@ impl Application {
     }
     pub fn snapshot(&mut self) -> Result<Snapshot> {
         let services = self.supervisor.states(&self.store)?;
-        self.refresh_live_routes(&services)?;
+        if self
+            .last_routes
+            .is_none_or(|last| last.elapsed() >= Duration::from_secs(2))
+        {
+            self.refresh_live_routes(&services)?;
+            self.last_routes = Some(std::time::Instant::now());
+        }
         let installed = runtime::installed(&self.store)?;
         let mut sites = self.sites()?;
         let caddy = services
@@ -612,6 +652,17 @@ impl Application {
         site: &Site,
         p: &crate::projects::processes::ProjectProcess,
     ) -> Result<()> {
+        self.spawn_project_process(site, p)?;
+        let result = self
+            .supervisor
+            .wait_healthy(&self.store, &p.key, Duration::from_secs(60));
+        self.finish_project_health(site, p, result)
+    }
+    pub(crate) fn spawn_project_process(
+        &mut self,
+        site: &Site,
+        p: &crate::projects::processes::ProjectProcess,
+    ) -> Result<()> {
         let binding = site
             .resolved
             .get(&p.definition.runtime)
@@ -663,17 +714,24 @@ impl Application {
             return Err(e);
         }
         self.store.set_setting(&key, &fingerprint)?;
-        if let Err(error) = self
-            .supervisor
-            .wait_healthy(&self.store, &p.key, Duration::from_secs(60))
-            .and_then(|()| {
-                if site.project_type == "laravel" && p.definition.id == "vite" {
-                    crate::projects::vite::validate(&self.home, site)
-                } else {
-                    Ok(())
-                }
-            })
-        {
+        Ok(())
+    }
+    pub(crate) fn finish_project_health(
+        &mut self,
+        site: &Site,
+        p: &crate::projects::processes::ProjectProcess,
+        result: Result<()>,
+    ) -> Result<()> {
+        if let Err(error) = result.and_then(|()| {
+            if !self.supervisor.contains(&p.key) {
+                return fail("Project start was stopped before it completed");
+            }
+            if site.project_type == "laravel" && p.definition.id == "vite" {
+                crate::projects::vite::validate(&self.home, site)
+            } else {
+                Ok(())
+            }
+        }) {
             // An unsuccessful first Start must not leave an unauthorized recovery task running.
             self.supervisor.stop(&self.store, &p.key)?;
             if site.project_type == "laravel" && p.definition.id == "vite" {
@@ -686,6 +744,42 @@ impl Application {
             return Err(error);
         }
         Ok(())
+    }
+    pub(crate) fn prepare_process_start(
+        &mut self,
+        id: &str,
+        process_id: &str,
+        operation: &str,
+    ) -> Result<(Site, crate::projects::processes::ProjectProcess)> {
+        let site = self.site(id)?;
+        let p = site
+            .processes
+            .iter()
+            .find(|p| p.definition.id == process_id)
+            .ok_or_else(|| crate::core::Error::Message("Unknown project process".into()))?;
+        if site.metadata.route == crate::projects::metadata::RouteStrategy::NodeProxy
+            && process_id == "web"
+            && !p.definition.port
+        {
+            return fail("The web process requires a managed port and owned-listener health check");
+        }
+        if operation == "restart" {
+            self.supervisor.stop(&self.store, &p.key)?;
+        }
+        self.paused.remove(&p.key);
+        if site.metadata.error.is_some() {
+            return fail(site.metadata.error.as_deref().unwrap());
+        }
+        self.spawn_project_process(&site, p)?;
+        let process = p.clone();
+        Ok((site, process))
+    }
+    pub(crate) fn commit_process_start(&mut self, site: &Site, process_id: &str) -> Result<()> {
+        crate::projects::processes::enable(&self.store, site, process_id, true)?;
+        self.store
+            .set_setting(&format!("site.{}.disabled", site.id), "false")?;
+        self.active = true;
+        self.start_required()
     }
     pub fn process_action(&mut self, id: &str, process_id: &str, operation: &str) -> Result<()> {
         let site = self.site(id)?;

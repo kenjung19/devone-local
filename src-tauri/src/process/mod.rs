@@ -118,18 +118,7 @@ impl Supervisor {
     pub fn wait_healthy(&mut self, store: &Store, key: &str, timeout: Duration) -> Result<()> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            self.reconcile(store)?;
-            let Some(p) = self.children.get(key) else {
-                return fail(format!("{key} exited; inspect its log"));
-            };
-            if process_healthy(p) {
-                store.conn.execute(
-                    "UPDATE process_state SET status='running' WHERE service_key=?1",
-                    [key],
-                )?;
-                if let Some(recovery) = self.recovery.get_mut(key) {
-                    recovery.healthy = true;
-                }
+            if self.healthy_once(store, key)? {
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -138,6 +127,23 @@ impl Supervisor {
             "{key} did not become healthy within {} seconds",
             timeout.as_secs()
         ))
+    }
+    pub(crate) fn healthy_once(&mut self, store: &Store, key: &str) -> Result<bool> {
+        self.reconcile(store)?;
+        let Some(p) = self.children.get(key) else {
+            return fail(format!("{key} exited; inspect its log"));
+        };
+        if !process_healthy(p) {
+            return Ok(false);
+        }
+        store.conn.execute(
+            "UPDATE process_state SET status='running' WHERE service_key=?1",
+            [key],
+        )?;
+        if let Some(recovery) = self.recovery.get_mut(key) {
+            recovery.healthy = true;
+        }
+        Ok(true)
     }
     pub fn reconcile(&mut self, store: &Store) -> Result<()> {
         let keys: Vec<String> = self.children.keys().cloned().collect();

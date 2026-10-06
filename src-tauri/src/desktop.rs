@@ -211,6 +211,9 @@ pub fn dispatch_menu(
     let shared = shared.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let result = (|| -> crate::core::Result<()> {
+            if action == "quit" {
+                return crate::ipc::shutdown_shared(&shared);
+            }
             let mut core = shared
                 .lock()
                 .map_err(|_| crate::core::Error::Message("Core lock poisoned".into()))?;

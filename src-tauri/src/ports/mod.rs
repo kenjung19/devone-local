@@ -19,12 +19,9 @@ impl PortManager {
                 |r| r.get(0),
             )
             .optional()?;
-        let listener = if let Some(port) = previous {
-            TcpListener::bind(("127.0.0.1", port)).map_err(|e| {
-                crate::core::Error::Message(format!(
-                    "Reserved port {port} for {owner} is occupied: {e}"
-                ))
-            })?
+        let reusable = previous.and_then(|port| TcpListener::bind(("127.0.0.1", port)).ok());
+        let listener = if let Some(listener) = reusable {
+            listener
         } else {
             let mut chosen = None;
             for _ in 0..32 {
@@ -50,40 +47,7 @@ impl PortManager {
         })
     }
     pub fn allocate_process(store: &Store, owner: &str) -> Result<Reservation> {
-        if !owner.starts_with("site:") {
-            return Self::allocate(store, owner);
-        }
-        match Self::allocate(store, owner) {
-            Ok(r) => Ok(r),
-            Err(e) => {
-                // Site ports are dynamic. TIME_WAIT or a foreign listener never warrants killing it.
-                // Choose another free port and let Caddy reconcile the new upstream.
-                let mut chosen = None;
-                for _ in 0..32 {
-                    let candidate = TcpListener::bind(("127.0.0.1", 0))?;
-                    let port = candidate.local_addr()?.port();
-                    let used: bool = store.conn.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM port_allocations WHERE port=?1)",
-                        [port],
-                        |r| r.get(0),
-                    )?;
-                    if !used {
-                        chosen = Some(candidate);
-                        break;
-                    }
-                }
-                let listener = chosen.ok_or_else(|| {
-                    crate::core::Error::Message("No unused project process port available".into())
-                })?;
-                let port = listener.local_addr()?.port();
-                store.conn.execute("INSERT INTO port_allocations(owner,port) VALUES(?1,?2) ON CONFLICT(owner) DO UPDATE SET port=excluded.port",rusqlite::params![owner,port])?;
-                tracing::warn!(service=%owner,port,error=%e,"previous project port unavailable; assigned a new free port");
-                Ok(Reservation {
-                    port,
-                    _listener: listener,
-                })
-            }
-        }
+        Self::allocate(store, owner)
     }
     pub fn reserve(store: &Store, owner: &str, port: u16) -> Result<Reservation> {
         if port == 0 {
@@ -114,6 +78,35 @@ impl PortManager {
 mod tests {
     use super::*;
     #[test]
+    fn service_ports_fall_back_without_replacing_foreign_listener_or_fixed_port() {
+        let d = tempfile::tempdir().unwrap();
+        let store = Store::open(&d.path().join("db")).unwrap();
+        for owner in ["caddy-admin", "php:8.4", "mysql:8.4"] {
+            let foreign = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let busy = foreign.local_addr().unwrap().port();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO port_allocations(owner,port) VALUES(?1,?2)",
+                    rusqlite::params![owner, busy],
+                )
+                .unwrap();
+            let replacement = PortManager::allocate(&store, owner).unwrap();
+            assert_ne!(replacement.port, busy);
+            assert!(PortManager::healthy(busy));
+            assert!(PortManager::reserve(&store, "fixed-http", busy).is_err());
+            let saved: u16 = store
+                .conn
+                .query_row(
+                    "SELECT port FROM port_allocations WHERE owner=?1",
+                    [owner],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(saved, replacement.port);
+        }
+    }
+    #[test]
     fn allocations_reuse_and_detect_conflicts() {
         let d = tempfile::tempdir().unwrap();
         let s = Store::open(&d.path().join("db")).unwrap();
@@ -121,10 +114,13 @@ mod tests {
         let p = a.port;
         let b = PortManager::allocate(&s, "php:b").unwrap();
         assert_ne!(p, b.port);
-        assert!(PortManager::allocate(&s, "php:a").is_err());
+        let fallback = PortManager::allocate(&s, "php:a").unwrap();
+        assert_ne!(fallback.port, p);
+        let new_port = fallback.port;
         drop(a);
+        drop(fallback);
         let a = PortManager::allocate(&s, "php:a").unwrap();
-        assert_eq!(a.port, p);
+        assert_eq!(a.port, new_port);
         drop(a);
         PortManager::release(&s, "php:a").unwrap();
     }

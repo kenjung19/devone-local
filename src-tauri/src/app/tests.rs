@@ -1,6 +1,45 @@
 use super::*;
 
 #[test]
+fn completed_health_wait_cannot_authorize_a_process_stopped_by_shutdown() {
+    let d = tempfile::tempdir().unwrap();
+    let mut app = Application::open_with_options(
+        Home::new(d.path()),
+        Options {
+            system_setup: false,
+            autostart: false,
+        },
+    )
+    .unwrap();
+    let project = app.home.www().join("node-site");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"scripts":{"dev":"node server.js"}}"#,
+    )
+    .unwrap();
+    app.scan().unwrap();
+    let site = app.sites().unwrap().remove(0);
+    let process = site
+        .processes
+        .iter()
+        .find(|p| p.definition.id == "web")
+        .unwrap();
+    app.shutdown().unwrap();
+    assert!(app.finish_project_health(&site, process, Ok(())).is_err());
+    assert!(!app.active);
+    assert!(
+        !app.site(&site.id)
+            .unwrap()
+            .processes
+            .iter()
+            .find(|p| p.definition.id == "web")
+            .unwrap()
+            .enabled
+    );
+}
+
+#[test]
 fn broken_upgrade_backup_does_not_block_launch_or_start_routes() {
     let d = tempfile::tempdir().unwrap();
     let home = Home::new(d.path());

@@ -227,7 +227,7 @@ pub fn unprotect_secret(bytes: &[u8]) -> Result<Vec<u8>> {
 }
 
 pub fn wildcard_system_ready() -> bool {
-    if !wildcard_ready() || crate::dns::server::probe(53).is_err() {
+    if !wildcard_ready() || !crate::dns::server::cached_health(53) {
         return false;
     }
     #[cfg(windows)]

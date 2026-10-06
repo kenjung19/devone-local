@@ -64,6 +64,9 @@ pub fn sync_hosts(hosts: &[String]) -> Result<()> {
     for host in hosts {
         super::validate_local_host(host)?;
     }
+    if unsafe { windows_sys::Win32::UI::Shell::IsUserAnAdmin() } == 0 {
+        return Err(crate::core::Error::NotElevated("Hosts fallback requires Administrator rights. Run DEVONE from CMD Admin, or use Local Domains setup with its isolated elevated helper.".into()));
+    }
     let path = hosts_path()?;
     let original = fs::read_to_string(&path)?;
     let mut output = String::new();
@@ -118,7 +121,7 @@ pub fn sync_hosts(hosts: &[String]) -> Result<()> {
     if !backup.exists() {
         fs::copy(&path, &backup)?;
     }
-    fs::write(path, output).map_err(|e| {
+    crate::runtime::atomic_write(&path, output.as_bytes()).map_err(|e| {
         crate::core::Error::Message(format!(
             "Local DNS setup requires an elevated DEVONE session: {e}"
         ))

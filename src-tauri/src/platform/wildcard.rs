@@ -147,6 +147,9 @@ fn write_policy(k: &RegKey) -> Result<()> {
     Ok(())
 }
 pub fn elevate(remove: bool) -> Result<()> {
+    if remove && !owned() {
+        return Ok(());
+    }
     if !remove {
         preflight()?;
     }

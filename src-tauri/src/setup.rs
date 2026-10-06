@@ -45,7 +45,7 @@ pub fn state(store: &Store, home: &Home) -> Result<State> {
             .all(|p| home.path(p).is_dir()),
         dns_policy: crate::platform::wildcard_ready(),
         dns_system: crate::platform::wildcard_system_ready(),
-        dns_server: crate::dns::server::probe(53).is_ok(),
+        dns_server: crate::dns::server::cached_health(53),
         ca_present: ca.is_file(),
         ca_trusted: crate::platform::ca_trusted(&ca),
         ca_upgrade_pending: crate::tls::upgrade_pending(store, home)?,

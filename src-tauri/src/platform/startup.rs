@@ -54,7 +54,7 @@ pub fn set(home: &Home, enabled: bool) -> Result<()> {
     #[cfg(windows)]
     {
         use winreg::{RegKey, enums::*};
-        if state(home)?.conflict {
+        if enabled && state(home)?.conflict {
             return fail(
                 "The DEVONE startup entry belongs to another executable/Home; it was not overwritten",
             );
@@ -62,8 +62,8 @@ pub fn set(home: &Home, enabled: bool) -> Result<()> {
         let (key, _) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(KEY)?;
         if enabled {
             key.set_value(NAME, &command(&std::env::current_exe()?, home)?)?;
-        } else if key.get_value::<String, _>(NAME).is_ok() {
-            key.delete_value(NAME)?;
+        } else {
+            disable(&key)?;
         }
         Ok(())
     }
@@ -73,9 +73,34 @@ pub fn set(home: &Home, enabled: bool) -> Result<()> {
         fail("Start with Windows is only supported on Windows")
     }
 }
+#[cfg(windows)]
+fn disable(key: &winreg::RegKey) -> Result<()> {
+    if let Err(error) = key.delete_value(NAME)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(error.into());
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn disable_removes_conflicting_value_but_preserves_other_apps() {
+        use winreg::{RegKey, enums::HKEY_CURRENT_USER};
+        let root = RegKey::predef(HKEY_CURRENT_USER);
+        let path = format!("Software\\DevoneAcceptance\\{}", uuid::Uuid::new_v4());
+        let (key, _) = root.create_subkey(&path).unwrap();
+        key.set_value(NAME, &"foreign.exe --other-home").unwrap();
+        key.set_value("Other App", &"keep.exe").unwrap();
+        disable(&key).unwrap();
+        assert!(key.get_value::<String, _>(NAME).is_err());
+        assert_eq!(key.get_value::<String, _>("Other App").unwrap(), "keep.exe");
+        disable(&key).unwrap();
+        drop(key);
+        root.delete_subkey_all(path).unwrap();
+    }
     #[test]
     fn startup_is_one_app_command_with_scoped_home_and_safe_quoting() {
         let d = tempfile::tempdir().unwrap();

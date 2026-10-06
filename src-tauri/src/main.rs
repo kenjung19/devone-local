@@ -168,9 +168,7 @@ fn run() -> devone::core::Result<()> {
         if matches!(event, tauri::RunEvent::Exit) {
             finished.store(true, Ordering::Relaxed);
             drop(watcher.take());
-            if let Ok(mut app) = app.lock() {
-                let _ = app.shutdown();
-            }
+            let _ = devone::ipc::shutdown_shared(&app);
             if let Err(error) = instance.shutdown() {
                 tracing::error!(error=%error,"desktop activation cleanup failed");
             }

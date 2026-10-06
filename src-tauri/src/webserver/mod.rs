@@ -84,15 +84,19 @@ pub fn reconcile(
         return supervisor.stop(store, &runtime.id);
     }
     check_ca_files(home)?;
-    let admin = if supervisor.contains(&runtime.id) {
+    let admin_reservation = if supervisor.contains(&runtime.id) {
+        None
+    } else {
+        Some(PortManager::allocate(store, "caddy-admin")?)
+    };
+    let admin = if let Some(reservation) = &admin_reservation {
+        reservation.port
+    } else {
         store.conn.query_row(
             "SELECT port FROM port_allocations WHERE owner='caddy-admin'",
             [],
             |r| r.get(0),
         )?
-    } else {
-        let reservation = PortManager::allocate(store, "caddy-admin")?;
-        reservation.port
     };
     let text = Caddy.generate(home, sites, admin)?;
     let config = home.path("config/Caddyfile");
@@ -159,7 +163,6 @@ pub fn reconcile(
         }
         drop(http);
         drop(https);
-        let admin_reservation = PortManager::allocate(store, "caddy-admin")?;
         drop(admin_reservation);
         supervisor.start(
             store,
@@ -191,7 +194,7 @@ pub fn reconcile(
         supervisor.wait_healthy(store, &runtime.id, Duration::from_secs(15))?;
     }
     // Retain last validated config only after successful reload/start.
-    std::fs::copy(staging, config)?;
+    crate::runtime::atomic_write(&config, &std::fs::read(&staging)?)?;
     Ok(())
 }
 pub fn config_path(home: &Home) -> PathBuf {
