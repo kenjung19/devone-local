@@ -83,7 +83,7 @@ pub fn reconcile(
     if sites.is_empty() {
         return supervisor.stop(store, &runtime.id);
     }
-    crate::tls::ensure_ca(home)?;
+    check_ca_files(home)?;
     let admin = if supervisor.contains(&runtime.id) {
         store.conn.query_row(
             "SELECT port FROM port_allocations WHERE owner='caddy-admin'",
@@ -197,9 +197,38 @@ pub fn reconcile(
 pub fn config_path(home: &Home) -> PathBuf {
     home.path("config/Caddyfile")
 }
+fn check_ca_files(home: &Home) -> Result<()> {
+    use crate::tls::TlsProvider;
+    if crate::tls::CaddyTls.ca_path(home) == crate::tls::authority::root_path(home)
+        && (!crate::tls::authority::root_path(home).is_file()
+            || !crate::tls::authority::key_path(home).is_file())
+    {
+        return fail(
+            "DEVONE HTTPS CA files are missing. Use Settings → HTTPS to prepare the CA before starting sites.",
+        );
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn route_check_never_generates_or_parses_ca_files() {
+        let d = tempfile::tempdir().unwrap();
+        let home = Home::new(d.path());
+        home.ensure().unwrap();
+        assert!(
+            check_ca_files(&home)
+                .unwrap_err()
+                .to_string()
+                .contains("missing")
+        );
+        assert!(!crate::tls::authority::root_path(&home).exists());
+        std::fs::create_dir(home.path("certs/devone-ca")).unwrap();
+        std::fs::write(crate::tls::authority::root_path(&home), "placeholder").unwrap();
+        std::fs::write(crate::tls::authority::key_path(&home), "placeholder").unwrap();
+        check_ca_files(&home).unwrap();
+    }
     #[test]
     fn configuration_rejects_injection() {
         assert!(quoted(std::path::Path::new("bad\nroot")).is_err());

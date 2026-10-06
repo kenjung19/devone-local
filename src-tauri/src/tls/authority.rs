@@ -116,6 +116,22 @@ pub fn validate(home: &Home) -> Result<()> {
     Ok(())
 }
 pub fn ensure(home: &Home) -> Result<()> {
+    let certs = home.path("certs");
+    safe_path(home, &certs)?;
+    for entry in std::fs::read_dir(&certs)? {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".devone-ca-")
+            && !crate::platform::is_link(&entry.path())?
+            && entry.file_type()?.is_dir()
+        {
+            safe_path(home, &entry.path())?;
+            // Check descendants too: recursive removal must never traverse a link.
+            remove_staging(home, &entry.path())?;
+        }
+    }
     let directory = home.path("certs/devone-ca");
     safe_path(home, &directory)?;
     if directory.exists() {
@@ -153,10 +169,39 @@ pub fn ensure(home: &Home) -> Result<()> {
     std::fs::rename(staging, directory)?;
     validate(home)
 }
+fn remove_staging(home: &Home, path: &Path) -> Result<()> {
+    safe_path(home, path)?;
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        safe_path(home, &entry.path())?;
+        if entry.file_type()?.is_dir() {
+            remove_staging(home, &entry.path())?;
+        } else {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    std::fs::remove_dir(path)?;
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ensure_removes_abandoned_private_key_staging_only() {
+        let d = tempfile::tempdir().unwrap();
+        let home = Home::new(d.path());
+        home.ensure().unwrap();
+        let abandoned = home.path("certs/.devone-ca-abandoned");
+        std::fs::create_dir(&abandoned).unwrap();
+        std::fs::write(abandoned.join("root.key"), "orphaned secret").unwrap();
+        let unrelated = home.path("certs/other");
+        std::fs::create_dir(&unrelated).unwrap();
+        ensure(&home).unwrap();
+        assert!(!abandoned.exists());
+        assert!(unrelated.is_dir());
+        assert!(key_path(&home).is_file());
+    }
     #[test]
     fn constrained_root_parses_and_existing_key_is_not_overwritten() {
         let d = tempfile::tempdir().unwrap();

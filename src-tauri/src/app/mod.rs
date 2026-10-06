@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod tests;
 pub mod watcher;
 use crate::{
     catalog::{self, RuntimeManifest},
@@ -59,6 +61,7 @@ pub struct Application {
     options: Options,
     routed: BTreeMap<String, String>,
     paused: BTreeSet<String>,
+    ca_blocked: bool,
 }
 impl Application {
     pub fn open(home: Home) -> Result<Self> {
@@ -86,7 +89,9 @@ impl Application {
         let store = Store::open(&home.path("devone.db"))?;
         // Interrupted upgrades with no replacement trust restore the legacy
         // served chain before any automatic service starts, without a prompt.
-        crate::tls::resume_safe_pending(&store, &home)?;
+        let ca_error = crate::tls::resume_safe_pending(&store, &home)
+            .and_then(|()| crate::tls::ensure_ca(&home))
+            .err();
         crate::tools::migrate_defaults(&store)?;
         crate::tools::tasks::load(&home)?;
         crate::phase3::templates::load(&home)?;
@@ -101,7 +106,12 @@ impl Application {
             options,
             routed: BTreeMap::new(),
             paused: BTreeSet::new(),
+            ca_blocked: ca_error.is_some(),
         };
+        if let Some(error) = ca_error {
+            tracing::error!(%error, "HTTPS CA startup recovery failed");
+            app.record_issue(format!("HTTPS CA upgrade could not be rolled back automatically: {error}. Use Settings → HTTPS to retry."));
+        }
         if let Err(e) = catalog::refresh(&app.store, &app.home.path("config/runtime-catalog.json"))
         {
             app.issues.push(e.to_string());
@@ -275,6 +285,9 @@ impl Application {
         }
         self.routed.clear();
         let result = crate::tls::recreate(&self.store, &self.home, confirmed);
+        if result.is_ok() {
+            self.ca_blocked = false;
+        }
         if self.active
             && let Err(e) = self.start_required()
         {
@@ -288,7 +301,7 @@ impl Application {
     pub fn upgrade_ca(&mut self) -> Result<()> {
         let home = self.home.clone();
         let store = Store::background(&home.path("devone.db"))?;
-        crate::tls::upgrade(&store, &home, |mode| {
+        let result = crate::tls::upgrade(&store, &home, |mode| {
             match mode {
                 crate::tls::Reload::Stop => {
                     for item in runtime::installed(&self.store)?
@@ -301,13 +314,21 @@ impl Application {
                 }
                 crate::tls::Reload::Start => {
                     crate::setup::prepare_ca(&self.store, &self.home)?;
+                    self.ca_blocked = false;
                     if self.active {
                         self.start_required()?;
                     }
                 }
             }
             Ok(())
-        })
+        });
+        if result.is_ok() {
+            self.ca_blocked = false;
+            self.issues.retain(|i| {
+                !i.starts_with("HTTPS CA upgrade could not be rolled back automatically:")
+            });
+        }
+        result
     }
     pub fn snapshot(&mut self) -> Result<Snapshot> {
         let services = self.supervisor.states(&self.store)?;
@@ -549,7 +570,7 @@ impl Application {
         self.issues.retain(|s| !s.starts_with("Project: "));
         self.issues
             .extend(errors.into_iter().map(|s| format!("Project: {s}")));
-        if !routes.is_empty() {
+        if !routes.is_empty() && !self.ca_blocked {
             let reference =
                 runtime::default_ref(&self.store, &RuntimeType::Caddy)?.ok_or_else(|| {
                     crate::core::Error::Message(
@@ -833,7 +854,7 @@ impl Application {
                 crate::projects::vite::cleanup(&self.home, site)?;
             }
         }
-        if !self.active {
+        if !self.active || self.ca_blocked {
             return Ok(());
         }
         let mut routes = Vec::new();
@@ -950,11 +971,8 @@ impl Application {
     pub fn stop_all(&mut self) -> Result<()> {
         self.routed.clear();
         self.active = false;
-        self.supervisor.stop_all(&self.store)?;
-        for site in self.sites()?.iter().filter(|s| s.project_type == "laravel") {
-            crate::projects::vite::cleanup(&self.home, site)?;
-        }
-        Ok(())
+        let stopped = self.supervisor.stop_all(&self.store);
+        self.cleanup_after_stop(stopped)
     }
     pub fn shutdown(&mut self) -> Result<()> {
         crate::phase3::templates::cancel_home(&self.home);
@@ -962,16 +980,44 @@ impl Application {
         self.active = false;
         self.routed.clear();
         self._dns = None;
-        self.supervisor.stop_all(&self.store)?;
-        for site in self.sites()?.iter().filter(|s| s.project_type == "laravel") {
-            crate::projects::vite::cleanup(&self.home, site)?;
-        }
-        Ok(())
+        let stopped = self.supervisor.stop_all(&self.store);
+        self.cleanup_after_stop(stopped)
     }
     pub fn restart(&mut self) -> Result<()> {
-        self.routed.clear();
-        self.supervisor.stop_all(&self.store)?;
-        self.start_all()
+        let stopped = self.stop_all();
+        let started = self.start_all();
+        let errors = [stopped.err(), started.err()]
+            .into_iter()
+            .flatten()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            fail(errors.join("; "))
+        }
+    }
+    fn cleanup_after_stop(&self, stopped: Result<()>) -> Result<()> {
+        let mut errors = stopped
+            .err()
+            .map(|e| e.to_string())
+            .into_iter()
+            .collect::<Vec<_>>();
+        match self.sites() {
+            Ok(sites) => {
+                for site in sites.iter().filter(|s| s.project_type == "laravel") {
+                    if let Err(e) = crate::projects::vite::cleanup(&self.home, site) {
+                        errors.push(format!("{} Vite cleanup: {e}", site.hostname));
+                    }
+                }
+            }
+            Err(e) => errors.push(e.to_string()),
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            fail(errors.join("; "))
+        }
     }
     pub fn set_default(&mut self, reference: RuntimeRef) -> Result<()> {
         runtime::set_default(&self.store, &reference)?;

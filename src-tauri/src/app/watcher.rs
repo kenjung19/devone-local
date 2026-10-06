@@ -34,6 +34,29 @@ fn discovery_state(www: &Path) -> Result<BTreeMap<PathBuf, String>> {
     }
     Ok(state)
 }
+fn poll_discovery(
+    app: &Arc<Mutex<Application>>,
+    path: &Path,
+    known: &mut BTreeMap<PathBuf, String>,
+) {
+    // Read project metadata before taking the application lock, for events and polls alike.
+    let state = discovery_state(path);
+    if let Ok(mut app) = app.lock() {
+        match state {
+            Ok(state) => {
+                app.issues.retain(|i| !i.starts_with("Discovery: Poll:"));
+                if state != *known {
+                    if let Err(e) = app.scan() {
+                        app.record_issue(format!("Discovery: {e}"));
+                    }
+                    // A failed scan must not retry service starts every five seconds.
+                    *known = state;
+                }
+            }
+            Err(e) => app.record_issue(format!("Discovery: Poll: {e}")),
+        }
+    }
+}
 pub fn watch(app: Arc<Mutex<Application>>) -> Result<WatchHandle> {
     use notify::Watcher;
     let path = app
@@ -60,17 +83,15 @@ pub fn watch(app: Arc<Mutex<Application>>) -> Result<WatchHandle> {
                 Ok(event) => {
                     std::thread::sleep(Duration::from_millis(250));
                     while rx.try_recv().is_ok() {}
-                    if let Ok(mut app) = app.lock() {
-                        match event {
-                            Ok(_) => {
-                                if let Err(e) = app.scan() {
-                                    app.record_issue(e.to_string())
-                                } else if let Ok(state) = discovery_state(&path) {
-                                    known = state;
-                                }
-                                last_scan = Instant::now();
+                    match event {
+                        Ok(_) => {
+                            poll_discovery(&app, &path, &mut known);
+                            last_scan = Instant::now();
+                        }
+                        Err(e) => {
+                            if let Ok(mut app) = app.lock() {
+                                app.record_issue(format!("Watcher: {e}"));
                             }
-                            Err(e) => app.record_issue(format!("Watcher: {e}")),
                         }
                     }
                 }
@@ -87,23 +108,7 @@ pub fn watch(app: Arc<Mutex<Application>>) -> Result<WatchHandle> {
             // Reconcile these without subscribing to dependency/log trees or
             // retrying failed starts when discovery metadata has not changed.
             if last_scan.elapsed() >= Duration::from_secs(5) {
-                match discovery_state(&path) {
-                    Ok(state) if state != known => {
-                        if let Ok(mut app) = app.lock() {
-                            if let Err(e) = app.scan() {
-                                app.record_issue(e.to_string());
-                            } else {
-                                known = state;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        if let Ok(mut app) = app.lock() {
-                            app.record_issue(e.to_string());
-                        }
-                    }
-                    _ => {}
-                }
+                poll_discovery(&app, &path, &mut known);
                 last_scan = Instant::now();
             }
         }
@@ -127,6 +132,54 @@ impl Drop for WatchHandle {
 mod tests {
     use super::*;
     use crate::{app::Options, config::Home};
+    #[test]
+    fn poll_clears_transient_errors_and_remembers_failed_scans() {
+        let d = tempfile::tempdir().unwrap();
+        let home = Home::new(d.path());
+        let app = Arc::new(Mutex::new(
+            Application::open_with_options(
+                home.clone(),
+                Options {
+                    system_setup: false,
+                    autostart: false,
+                },
+            )
+            .unwrap(),
+        ));
+        let mut known = discovery_state(&home.www()).unwrap();
+        poll_discovery(&app, &home.path("missing"), &mut known);
+        assert!(
+            app.lock()
+                .unwrap()
+                .issues
+                .iter()
+                .any(|i| i.starts_with("Discovery: Poll:"))
+        );
+        poll_discovery(&app, &home.www(), &mut known);
+        assert!(app.lock().unwrap().issues.is_empty());
+        std::fs::create_dir(home.www().join("new-site")).unwrap();
+        app.lock().unwrap().store.conn.execute_batch("CREATE TRIGGER reject_site BEFORE INSERT ON sites BEGIN SELECT RAISE(FAIL,'scan failed'); END;").unwrap();
+        poll_discovery(&app, &home.www(), &mut known);
+        assert_eq!(known, discovery_state(&home.www()).unwrap());
+        assert!(
+            app.lock()
+                .unwrap()
+                .issues
+                .iter()
+                .any(|i| i.contains("scan failed"))
+        );
+        app.lock()
+            .unwrap()
+            .store
+            .conn
+            .execute_batch("DROP TRIGGER reject_site;")
+            .unwrap();
+        poll_discovery(&app, &home.www(), &mut known);
+        assert!(
+            app.lock().unwrap().sites().unwrap().is_empty(),
+            "unchanged event retried failed scan"
+        );
+    }
 
     #[test]
     fn snapshot_does_not_restart_caddy_that_exited_before_healthy() {
