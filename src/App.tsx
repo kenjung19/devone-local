@@ -46,6 +46,7 @@ export default function App() {
   const [data, setData] = useState<Snapshot | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [pollError, setPollError] = useState("");
   const [pending, setPending] = useState<Action | null>(null);
   const [notice, setNotice] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
@@ -66,8 +67,9 @@ export default function App() {
     if (desktop) {
       try {
         setData(await bridge.snapshot());
+        setPollError("");
       } catch (e) {
-        setError(String(e));
+        setPollError(String(e));
       }
     }
   }, []);
@@ -101,8 +103,10 @@ export default function App() {
       setData(result.snapshot);
       if (action.type === "finish_setup") setPage("Sites");
       if (result.message) setNotice(result.message);
+      return true;
     } catch (e) {
       setError(String(e));
+      return false;
     } finally {
       setBusy(false);
       setPending(null);
@@ -118,7 +122,7 @@ export default function App() {
         <Setup
           data={data}
           busy={busy}
-          error={error}
+          error={error || pollError}
           progress={progress}
           act={act}
           close={() => {
@@ -268,7 +272,7 @@ export default function App() {
                 : "Working..."}
             </p>
           )}
-          <ErrorNotice error={error} />
+          <ErrorNotice error={error || pollError} />
           {notice && (
             <div className="alert success" style={{ whiteSpace: "pre-wrap" }}>
               {notice}

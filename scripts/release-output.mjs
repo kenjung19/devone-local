@@ -7,6 +7,16 @@ import {
 } from "node:fs";
 import { join, basename } from "node:path";
 import { createHash } from "node:crypto";
+export function selectInstaller(filenames, version) {
+  const matches = filenames.filter(
+    (name) => name.includes(`_${version}_x64`) && name.endsWith("-setup.exe"),
+  );
+  if (matches.length !== 1)
+    throw Error(
+      `Expected exactly one ${version} x64 NSIS installer; found ${matches.length}`,
+    );
+  return matches;
+}
 export function auditPayload(script) {
   const statements = script
     .split(/\r?\n/)

@@ -170,9 +170,11 @@ pub enum Action {
 pub struct Response {
     pub snapshot: Snapshot,
     pub message: Option<String>,
+    pub credential: Option<String>,
 }
 fn apply(app: &mut Application, action: Action) -> Result<Response> {
     let mut message = None;
+    let mut credential = None;
     match action {
         Action::CreateProject { request } => {
             let template = crate::phase3::templates::registry(&app.home)?
@@ -333,7 +335,7 @@ fn apply(app: &mut Application, action: Action) -> Result<Response> {
                         .into_iter()
                         .find(|b| b.runtime_id == runtime_id && b.database_name == database_name)
                         .ok_or_else(|| Error::Message("Managed database not found".into()))?;
-                    message = Some(
+                    credential = Some(
                         crate::database::provision::secret(&app.home, &b.credential_ref)?
                             .to_string(),
                     );
@@ -479,7 +481,7 @@ fn apply(app: &mut Application, action: Action) -> Result<Response> {
                 .into_iter()
                 .find(|b| b.site_id == site_id)
                 .ok_or_else(|| Error::Message("No credential exists for this site".into()))?;
-            message = Some(
+            credential = Some(
                 crate::database::provision::secret(&app.home, &binding.credential_ref)?.to_string(),
             );
         }
@@ -696,6 +698,7 @@ fn apply(app: &mut Application, action: Action) -> Result<Response> {
     Ok(Response {
         snapshot: app.snapshot()?,
         message,
+        credential,
     })
 }
 fn lock(state: &Shared) -> Result<std::sync::MutexGuard<'_, Application>> {
@@ -748,6 +751,7 @@ pub fn execute_shared(state: &Shared, action: Action) -> Result<Response> {
         return Ok(Response {
             snapshot: app.snapshot()?,
             message: None,
+            credential: None,
         });
     }
     if matches!(
@@ -783,6 +787,7 @@ pub fn execute_shared(state: &Shared, action: Action) -> Result<Response> {
         return Ok(Response {
             snapshot: lock(state)?.snapshot()?,
             message,
+            credential: None,
         });
     }
     apply(&mut app, action)
@@ -1080,6 +1085,67 @@ mod locking_tests {
         )
         .unwrap();
         (root, Arc::new(Mutex::new(app)))
+    }
+    #[cfg(windows)]
+    #[test]
+    fn database_password_uses_credential_field_and_never_message_or_snapshot() {
+        let (_root, shared) = application();
+        let mut app = lock(&shared).unwrap();
+        let manifest = app
+            .snapshot()
+            .unwrap()
+            .available
+            .into_iter()
+            .find(|m| m.runtime == RuntimeType::Mysql)
+            .unwrap();
+        let runtime_id = format!("mysql:{}", manifest.version);
+        app.store
+            .conn
+            .execute(
+                "INSERT INTO runtime_installations VALUES(?1,'mysql',?2,?3,?4,0)",
+                rusqlite::params![
+                    runtime_id,
+                    manifest.version,
+                    serde_json::to_string(&manifest).unwrap(),
+                    format!("runtimes/mysql/{}", manifest.version)
+                ],
+            )
+            .unwrap();
+        let reference = uuid::Uuid::new_v4().to_string();
+        let password = "private-response-only";
+        let dir = app.home.path("config/credentials");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{reference}.bin")),
+            crate::platform::protect_secret(password.as_bytes()).unwrap(),
+        )
+        .unwrap();
+        app.store
+            .conn
+            .execute(
+                "INSERT INTO managed_databases VALUES(?1,'demo','demo',?2,'ready',0)",
+                rusqlite::params![runtime_id, reference],
+            )
+            .unwrap();
+        let response = apply(
+            &mut app,
+            Action::DbAdmin {
+                runtime_id,
+                operation: "credential".into(),
+                database_name: "demo".into(),
+                username: None,
+                confirmation: None,
+                path: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(response.credential.as_deref(), Some(password));
+        assert!(response.message.is_none());
+        assert!(
+            !serde_json::to_string(&response.snapshot)
+                .unwrap()
+                .contains(password)
+        );
     }
     #[test]
     fn pending_operation_allows_snapshot_and_shutdown_and_clears_on_error() {

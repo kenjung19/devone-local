@@ -16,7 +16,7 @@ export function SitesOverview({
 }: {
   data: Snapshot;
   busy: boolean;
-  act: (a: Action) => Promise<void>;
+  act: (a: Action) => Promise<boolean>;
   view: (id: string) => void;
   create: () => void;
 }) {

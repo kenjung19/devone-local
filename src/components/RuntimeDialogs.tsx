@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { bridge, desktop } from "../bridge";
 import type {
@@ -22,10 +22,16 @@ export function ImportDialog({
   busy: boolean;
   error: string;
   close: () => void;
-  act: (a: Action) => Promise<void>;
+  act: (a: Action) => Promise<boolean>;
 }) {
   const [version, setVersion] = useState("");
   const [source, setSource] = useState("");
+  const currentSource = useRef("");
+  const changeSource = useCallback((value: string) => {
+    currentSource.current = value;
+    setSource(value);
+    setVersion("");
+  }, []);
   const [binaries, setBinaries] = useState(
     JSON.stringify(data.binary_roles[kind], null, 2),
   );
@@ -38,8 +44,7 @@ export function ImportDialog({
     void getCurrentWebview()
       .onDragDropEvent((event) => {
         if (event.payload.type === "drop" && event.payload.paths[0]) {
-          setSource(event.payload.paths[0]);
-          setVersion("");
+          changeSource(event.payload.paths[0]);
         }
       })
       .then((remove) => {
@@ -51,7 +56,7 @@ export function ImportDialog({
       disposed = true;
       unlisten?.();
     };
-  }, []);
+  }, [changeSource]);
   return (
     <div className="overlay">
       <form
@@ -85,6 +90,8 @@ export function ImportDialog({
                 binaries: parsed as Record<string, string>,
                 metadata: {},
               },
+            }).then((success) => {
+              if (success) close();
             });
           } catch (e) {
             setErr(String(e));
@@ -121,7 +128,7 @@ export function ImportDialog({
           <input
             required
             value={source}
-            onChange={(e) => setSource(e.target.value)}
+            onChange={(e) => changeSource(e.target.value)}
             placeholder="Absolute path to extracted distribution"
           />
         </label>
@@ -131,10 +138,17 @@ export function ImportDialog({
           onClick={() => {
             setInspecting(true);
             setErr("");
+            const inspectedSource = source;
             void bridge
               .inspectImport(kind, source)
-              .then((m) => setVersion(m.version))
-              .catch((e) => setErr(String(e)))
+              .then((m) => {
+                if (currentSource.current === inspectedSource)
+                  setVersion(m.version);
+              })
+              .catch((e) => {
+                if (currentSource.current === inspectedSource)
+                  setErr(String(e));
+              })
               .finally(() => setInspecting(false));
           }}
         >
@@ -180,7 +194,7 @@ export function PhpDialog({
   busy: boolean;
   error: string;
   close: () => void;
-  act: (a: Action) => Promise<void>;
+  act: (a: Action) => Promise<boolean>;
 }) {
   const settings = data.php_settings[runtime.manifest.version];
   const [config, setConfig] = useState<PhpConfig>(
@@ -211,6 +225,8 @@ export function PhpDialog({
             type: "php_config",
             version: runtime.manifest.version,
             config,
+          }).then((success) => {
+            if (success) close();
           });
         }}
       >

@@ -23,7 +23,7 @@ export function SiteDetail({
   site: Site;
   data: Snapshot;
   busy: boolean;
-  act: (a: Action) => Promise<void>;
+  act: (a: Action) => Promise<boolean>;
   back: () => void;
   logs: () => void;
 }) {
@@ -324,13 +324,21 @@ export function SiteDetail({
               <button
                 key={script}
                 disabled={busy}
-                onClick={() =>
+                onClick={() => {
+                  const replace = (site.processes ?? []).some(
+                    (p) => p.definition.id === "web",
+                  );
+                  if (
+                    replace &&
+                    !window.confirm(
+                      `Replace the web process definition with the ${script} script? The current process will stop.`,
+                    )
+                  )
+                    return;
                   void act({
                     type: "save_process",
                     site_id: site.id,
-                    replace: (site.processes ?? []).some(
-                      (p) => p.definition.id === "web",
-                    ),
+                    replace,
                     definition: {
                       id: "web",
                       name: "Web server",
@@ -342,8 +350,8 @@ export function SiteDetail({
                       port: true,
                       autostart: true,
                     },
-                  })
-                }
+                  });
+                }}
               >
                 Use {script} script (Local override)
               </button>
@@ -465,14 +473,20 @@ export function SiteDetail({
                         </button>
                         <button
                           disabled={busy}
-                          onClick={() =>
+                          onClick={() => {
+                            if (
+                              !window.confirm(
+                                `Remove the local ${p.definition.name} definition and stop its process? Detected processes will reset to their detected definition.`,
+                              )
+                            )
+                              return;
                             void act({
                               type: "site_process",
                               site_id: site.id,
                               process_id: p.definition.id,
                               operation: "remove",
-                            })
-                          }
+                            });
+                          }}
                         >
                           {["web", "vite", "queue", "scheduler"].includes(
                             p.definition.id,

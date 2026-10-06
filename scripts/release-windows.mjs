@@ -1,4 +1,8 @@
-import { auditPayload, copyReleaseOutput } from "./release-output.mjs";
+import {
+  auditPayload,
+  copyReleaseOutput,
+  selectInstaller,
+} from "./release-output.mjs";
 import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -19,11 +23,7 @@ const result = spawnSync(
 if (result.error) throw result.error;
 if (result.status !== 0) process.exit(result.status ?? 1);
 const directory = join(root, "src-tauri/target", target, "release/bundle/nsis");
-const artifacts = readdirSync(directory).filter(
-  (name) => name.includes(`_${version}_x64`) && name.endsWith("-setup.exe"),
-);
-if (!artifacts.length)
-  throw new Error(`No ${version} x64 NSIS installer found in ${directory}`);
+const artifacts = selectInstaller(readdirSync(directory), version);
 const installerScript = readFileSync(
   join(root, "src-tauri/target", target, "release/nsis/x64/installer.nsi"),
   "utf8",

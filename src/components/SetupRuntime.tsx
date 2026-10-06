@@ -11,7 +11,7 @@ export function SetupRuntime({
   data: Snapshot;
   kind: Exclude<RuntimeKind, "node">;
   busy: boolean;
-  act: (a: Action) => Promise<void>;
+  act: (a: Action) => Promise<boolean>;
   importRuntime: (k: RuntimeKind) => void;
 }) {
   const versions = Array.from(

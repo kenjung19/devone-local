@@ -104,7 +104,7 @@ const developer: NonNullable<Snapshot["developer"]> = {
   diagnostic_report: null,
 };
 
-const act = async () => {};
+const act = async () => true;
 describe("desktop setup and configuration presentation", () => {
   it("offers an explicit non-modal CA upgrade only for legacy/pending installs", () => {
     const legacy = { ...data, setup: { ...data.setup, caddy: true, ca_present: true, ca_trusted: true, ca_upgrade_pending: true } };
@@ -414,7 +414,7 @@ describe("Phase 3 workflows", () => {
       <NewProject
         data={{ ...data, developer }}
         busy={false}
-        act={async () => {}}
+        act={async () => true}
         view={() => {}}
       />,
     );
@@ -452,7 +452,7 @@ describe("Phase 3 workflows", () => {
           ],
         }}
         busy={false}
-        act={async () => {}}
+        act={async () => true}
         logs={() => {}}
       />,
     );
@@ -480,7 +480,7 @@ describe("Phase 3 workflows", () => {
           },
         }}
         busy={false}
-        act={async () => {}}
+        act={async () => true}
       />,
     );
     expect(html).toContain("Installed Editor");

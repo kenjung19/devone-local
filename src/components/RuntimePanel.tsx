@@ -9,7 +9,7 @@ export function RuntimePanel({
 }: {
   data: Snapshot;
   busy: boolean;
-  act: (a: Action) => Promise<void>;
+  act: (a: Action) => Promise<boolean>;
   importRuntime: (k: RuntimeKind) => void;
   configure: (r: Installation) => void;
 }) {

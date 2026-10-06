@@ -10,7 +10,7 @@ export function DatabaseManager({
 }: {
   data: Snapshot;
   busy: boolean;
-  act: (a: Action) => Promise<void>;
+  act: (a: Action) => Promise<boolean>;
   logs: () => void;
 }) {
   const [runtime, setRuntime] = useState(
@@ -26,6 +26,31 @@ export function DatabaseManager({
   const [confirmation, setConfirmation] = useState("");
   const [file, setFile] = useState("");
   const [error, setError] = useState("");
+  const [revealed, setRevealed] = useState<{
+    key: string;
+    password: string;
+  } | null>(null);
+  const reveal = async (runtime_id: string, database_name: string) => {
+    setRevealed(null);
+    try {
+      const result = await bridge.execute({
+        type: "db_admin",
+        runtime_id,
+        database_name,
+        operation: "credential",
+        username: null,
+        confirmation: null,
+        path: null,
+      });
+      setRevealed({
+        key: `${runtime_id}:${database_name}`,
+        password: result.credential ?? "",
+      });
+      setError("");
+    } catch (e) {
+      setError(String(e));
+    }
+  };
   const admin = (
     runtime_id: string,
     database_name: string,
@@ -284,20 +309,17 @@ export function DatabaseManager({
                 </button>
                 <button
                   disabled={busy}
-                  onClick={() =>
-                    void act({
-                      type: "db_admin",
-                      runtime_id: b.runtime_id,
-                      operation: "credential",
-                      database_name: b.database_name,
-                      username: null,
-                      confirmation: null,
-                      path: null,
-                    })
-                  }
+                  onClick={() => void reveal(b.runtime_id, b.database_name)}
                 >
                   Reveal Password
                 </button>
+                {revealed?.key === `${b.runtime_id}:${b.database_name}` &&
+                  revealed.password && (
+                    <p>
+                      <code>{revealed.password}</code>{" "}
+                      <button onClick={() => setRevealed(null)}>Hide</button>
+                    </p>
+                  )}
                 <button
                   onClick={() => {
                     const port = data.databases.find(

@@ -7,7 +7,7 @@ export function DeveloperSettings({
 }: {
   data: Snapshot;
   busy: boolean;
-  act: (a: Action) => Promise<void>;
+  act: (a: Action) => Promise<boolean>;
 }) {
   const [name, setName] = useState("Custom editor");
   const [exe, setExe] = useState("");
@@ -182,7 +182,7 @@ export function Diagnostics({
 }: {
   data: Snapshot;
   busy: boolean;
-  act: (a: Action) => Promise<void>;
+  act: (a: Action) => Promise<boolean>;
 }) {
   const [error, setError] = useState("");
   return (

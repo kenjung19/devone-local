@@ -31,7 +31,7 @@ export function Setup({
   busy: boolean;
   error: string;
   progress: InstallProgress | null;
-  act: (a: Action) => Promise<void>;
+  act: (a: Action) => Promise<boolean>;
   importRuntime: (k: RuntimeKind) => void;
   close: () => void;
   initialStep?: number;

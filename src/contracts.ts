@@ -225,6 +225,7 @@ export type Action =
 export interface Response {
   snapshot: Snapshot;
   message: string | null;
+  credential: string | null;
 }
 
 export interface Tool {

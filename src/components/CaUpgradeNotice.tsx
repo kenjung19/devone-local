@@ -7,7 +7,7 @@ export function CaUpgradeNotice({
 }: {
   data: Snapshot;
   busy: boolean;
-  act: (action: Action) => Promise<void>;
+  act: (action: Action) => Promise<boolean>;
 }) {
   if (!data.setup.ca_upgrade_pending) return null;
   return (

@@ -10,7 +10,7 @@ export function Provision({
   site: Site;
   data: Snapshot;
   busy: boolean;
-  act: (a: Action) => Promise<void>;
+  act: (a: Action) => Promise<boolean>;
 }) {
   const binding = data.project_databases.find((b) => b.site_id === site.id);
   const [name, setName] = useState(
@@ -79,7 +79,7 @@ export function Provision({
                       type: "reveal_credential",
                       site_id: site.id,
                     });
-                    setRevealed(r.message ?? "");
+                    setRevealed(r.credential ?? "");
                     setError("");
                   } catch (e) {
                     setError(String(e));

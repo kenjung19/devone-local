@@ -6,13 +6,11 @@ import {
   writeFileSync,
   existsSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
-const executable = resolve(
-  process.argv[2] ??
-    "src-tauri/target/x86_64-pc-windows-msvc/release/devone-local.exe",
-);
+import { smokeExecutable, assertSmokeAlive } from "./smoke-support.mjs";
+const executable = smokeExecutable(process.argv[2]);
 if (!existsSync(executable))
   throw Error(
     "Build release first or supply an installed devone-local.exe path",
@@ -23,17 +21,22 @@ const launch = () => {
     windowsHide: true,
     stdio: "ignore",
   });
+  let error;
   const done = new Promise((ok, fail) => {
-    child.on("error", fail);
+    child.on("error", (value) => {
+      error = value;
+      fail(value);
+    });
     child.on("exit", (code) =>
       code === 0 ? ok() : fail(Error(`Executable exited ${code}`)),
     );
   });
-  return { child, done };
+  return { child, done, check: () => assertSmokeAlive(child, error) };
 };
 async function poll(read) {
   const end = Date.now() + 30000;
   while (Date.now() < end) {
+    primary.check();
     const value = read();
     if (value) return value;
     await delay(150);

@@ -8,7 +8,7 @@ export function ProductSettings({
 }: {
   data: Snapshot;
   busy: boolean;
-  act: (a: Action) => Promise<void>;
+  act: (a: Action) => Promise<boolean>;
 }) {
   const [confirmCa, setConfirmCa] = useState(false);
   return (
