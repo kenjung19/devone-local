@@ -167,23 +167,14 @@ pub fn configure_wildcard_elevated(remove: bool) -> Result<()> {
 
 pub fn helper_dispatch() -> Option<Result<()>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
-    if args.len() != 1 {
-        return None;
+    #[cfg(windows)]
+    {
+        wildcard::helper_operation(&args).map(configure_wildcard_elevated)
     }
-    match args[0].as_str() {
-        "--devone-setup-dns" | "--devone-remove-dns" => {
-            #[cfg(windows)]
-            {
-                Some(configure_wildcard_elevated(
-                    args[0] == "--devone-remove-dns",
-                ))
-            }
-            #[cfg(not(windows))]
-            {
-                Some(fail("Windows helper is unavailable"))
-            }
-        }
-        _ => None,
+    #[cfg(not(windows))]
+    {
+        let _ = args;
+        None
     }
 }
 

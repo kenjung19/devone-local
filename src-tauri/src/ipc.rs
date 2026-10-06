@@ -615,7 +615,19 @@ fn apply(app: &mut Application, action: Action) -> Result<Response> {
                 _ => return crate::core::fail("Unknown database action"),
             }
         }
-        Action::Trust => crate::tls::CaddyTls.trust(&app.store, &app.home)?,
+        Action::Trust => {
+            let already_trusted =
+                crate::platform::ca_trusted(&crate::tls::CaddyTls.ca_path(&app.home));
+            crate::tls::CaddyTls.trust(&app.store, &app.home)?;
+            message = Some(
+                if already_trusted {
+                    "This exact DEVONE CA is already trusted. HTTPS trust state refreshed."
+                } else {
+                    "This exact DEVONE CA is trusted for the current Windows user."
+                }
+                .into(),
+            );
+        }
         Action::RemoveTrust => crate::tls::remove_trust(&app.store, &app.home)?,
         Action::RecreateCa { confirmed } => {
             app.recreate_ca(confirmed)?;

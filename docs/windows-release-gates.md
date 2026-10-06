@@ -1,5 +1,8 @@
 # Windows release gates — 2026-10-06
 
+Historical gate report. The subsequent authorization policy and current results
+are recorded in [Windows authorization readiness](windows-authorization-readiness.md).
+
 This report continues `main` at `01ba1ae618846dccb6e0b8bbb0e0d93f291d65a9`
 (`test: strengthen final Windows release acceptance`). Version remains 0.1.0.
 No Phase 4 features, dependency/toolchain version upgrades, automatic commit or

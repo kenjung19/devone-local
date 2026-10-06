@@ -131,15 +131,48 @@ pub fn sync_hosts(hosts: &[String]) -> Result<()> {
 pub fn trust_ca(path: &Path) -> Result<()> {
     // Windows may ask the user to approve a new root. Never leave a backend
     // worker blocked indefinitely when that confirmation is not completed.
-    crate::process::run_checked(
+    let outcome = crate::process::run_bounded(
         &system_executable("certutil.exe")?,
-        &["-user".into(), "-addstore".into(), "Root".into(), path.to_string_lossy().into()],
-        path.parent().ok_or_else(|| crate::core::Error::Message("CA has no parent directory".into()))?,
-        &BTreeMap::new(), std::time::Duration::from_secs(120),
-    ).map_err(|e| crate::core::Error::Message(format!(
-        "Windows did not confirm installation of the local HTTPS CA. Approve the current-user certificate prompt or retry HTTPS Setup: {e}"
-    )))?;
-    Ok(())
+        &ca_install_args(path),
+        path.parent()
+            .ok_or_else(|| crate::core::Error::Message("CA has no parent directory".into()))?,
+        &BTreeMap::new(),
+        std::time::Duration::from_secs(120),
+    )?;
+    // A command can fail after adding the certificate. Report the real exact
+    // store state, rather than a timeout/cancellation when trust already exists.
+    ca_install_result(outcome, ca_trusted(path))
+}
+fn ca_install_args(path: &Path) -> Vec<String> {
+    vec![
+        "-user".into(),
+        "-addstore".into(),
+        "Root".into(),
+        path.to_string_lossy().into(),
+    ]
+}
+fn ca_remove_args(id: &str) -> Result<Vec<String>> {
+    if id.len() != 40 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return fail("Removal requires a full exact certificate fingerprint");
+    }
+    Ok(vec![
+        "-user".into(),
+        "-delstore".into(),
+        "Root".into(),
+        id.into(),
+    ])
+}
+fn ca_install_result(outcome: crate::process::CommandOutcome, trusted: bool) -> Result<()> {
+    use crate::{core::Error, process::CommandOutcome};
+    if trusted {
+        return Ok(());
+    }
+    match outcome {
+        CommandOutcome::Exited { code: Some(code), .. } if matches!(code as u32, 1223 | 0x800704c7) =>
+            Err(Error::Cancelled("HTTPS trust installation was cancelled. This CA is not trusted; retry Install trust when ready.".into())),
+        CommandOutcome::TimedOut => Err(Error::ApprovalRequired("INTERACTIVE APPROVAL REQUIRED: Windows CA installation did not complete within 120 seconds. This CA is not trusted. Retry Install trust and approve its Windows confirmation; if already approved, inspect Windows certificate policy. Exact ownership is retained for cleanup.".into())),
+        CommandOutcome::Exited { code, output } => fail(format!("Windows CA installation failed (exit {code:?}). This CA is not trusted; retry Install trust. {output}")),
+    }
 }
 
 pub struct Ownership(HANDLE);
@@ -269,28 +302,39 @@ pub fn ca_trusted(path: &Path) -> bool {
             CertFreeCertificateContext(context as *const CERT_CONTEXT);
             return false;
         }
+        let trusted = exact_store_contains(store, context as *const CERT_CONTEXT);
+        CertCloseStore(store, 0);
+        CertFreeCertificateContext(context as *const CERT_CONTEXT);
+        trusted
+    }
+}
+
+unsafe fn exact_store_contains(
+    store: windows_sys::Win32::Security::Cryptography::HCERTSTORE,
+    context: *const windows_sys::Win32::Security::Cryptography::CERT_CONTEXT,
+) -> bool {
+    use windows_sys::Win32::Security::Cryptography::*;
+    unsafe {
         let found = CertFindCertificateInStore(
             store,
             X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
             0,
             CERT_FIND_EXISTING,
-            context,
+            context as *const _,
             std::ptr::null(),
         );
         // CERT_FIND_EXISTING matches issuer/serial. Trust requires the exact DER,
         // not merely another certificate with matching identifying fields.
         let trusted = !found.is_null()
-            && (*found).cbCertEncoded == (*(context as *const CERT_CONTEXT)).cbCertEncoded
+            && (*found).cbCertEncoded == (*context).cbCertEncoded
             && std::slice::from_raw_parts((*found).pbCertEncoded, (*found).cbCertEncoded as usize)
                 == std::slice::from_raw_parts(
-                    (*(context as *const CERT_CONTEXT)).pbCertEncoded,
-                    (*(context as *const CERT_CONTEXT)).cbCertEncoded as usize,
+                    (*context).pbCertEncoded,
+                    (*context).cbCertEncoded as usize,
                 );
         if !found.is_null() {
             CertFreeCertificateContext(found);
         }
-        CertCloseStore(store, 0);
-        CertFreeCertificateContext(context as *const CERT_CONTEXT);
         trusted
     }
 }
@@ -354,7 +398,7 @@ pub fn remove_ca_trust(path: &Path) -> Result<()> {
     }
     crate::process::run_checked(
         &system_executable("certutil.exe")?,
-        &["-user".into(), "-delstore".into(), "Root".into(), id],
+        &ca_remove_args(&id)?,
         path.parent()
             .ok_or_else(|| crate::core::Error::Message("CA has no parent directory".into()))?,
         &BTreeMap::new(),
@@ -566,6 +610,172 @@ pub fn choose_sql_file() -> Result<Option<PathBuf>> {
 
 #[cfg(test)]
 mod secret_tests {
+    #[test]
+    fn actual_cryptoapi_memory_store_rejects_same_subject_and_same_issuer_serial_with_other_der() {
+        use super::*;
+        use windows_sys::Win32::Security::Cryptography::*;
+        let d = tempfile::tempdir().unwrap();
+        let owned = d.path().join("owned.crt");
+        let other = d.path().join("other.crt");
+        std::fs::write(&owned, include_bytes!("../../tests/fixtures/ca-owned.crt")).unwrap();
+        std::fs::write(
+            &other,
+            include_bytes!("../../tests/fixtures/ca-unrelated.crt"),
+        )
+        .unwrap();
+        unsafe fn load(path: &Path) -> *const CERT_CONTEXT {
+            let wide: Vec<u16> = path
+                .to_string_lossy()
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+            let mut context = std::ptr::null_mut();
+            assert_ne!(
+                unsafe {
+                    CryptQueryObject(
+                        CERT_QUERY_OBJECT_FILE,
+                        wide.as_ptr() as *const _,
+                        CERT_QUERY_CONTENT_FLAG_CERT,
+                        CERT_QUERY_FORMAT_FLAG_ALL,
+                        0,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        &mut context,
+                    )
+                },
+                0
+            );
+            context as *const CERT_CONTEXT
+        }
+        unsafe {
+            let a = load(&owned);
+            let b = load(&other);
+            let store = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, 0, std::ptr::null());
+            assert!(!store.is_null());
+            assert_ne!(
+                CertAddCertificateContextToStore(
+                    store,
+                    b,
+                    CERT_STORE_ADD_NEW,
+                    std::ptr::null_mut()
+                ),
+                0
+            );
+            assert!(!exact_store_contains(store, a));
+            let der = std::slice::from_raw_parts((*a).pbCertEncoded, (*a).cbCertEncoded as usize);
+            let mut changed = der.to_vec();
+            let last = changed.len() - 1;
+            changed[last] ^= 1;
+            let same_fields = CertCreateCertificateContext(
+                X509_ASN_ENCODING,
+                changed.as_ptr(),
+                changed.len() as u32,
+            );
+            assert!(!same_fields.is_null());
+            assert_ne!(
+                CertAddCertificateContextToStore(
+                    store,
+                    same_fields,
+                    CERT_STORE_ADD_NEW,
+                    std::ptr::null_mut()
+                ),
+                0
+            );
+            assert!(!exact_store_contains(store, a)); // issuer/serial are identical, DER is not
+            assert_ne!(
+                CertAddCertificateContextToStore(
+                    store,
+                    a,
+                    CERT_STORE_ADD_REPLACE_EXISTING,
+                    std::ptr::null_mut()
+                ),
+                0
+            );
+            assert!(exact_store_contains(store, a));
+            assert!(exact_store_contains(store, b));
+            let id = certificate_store_id(&owned).unwrap();
+            assert_eq!(id.len(), 40);
+            assert_eq!(ca_remove_args(&id).unwrap()[3], id);
+            let found = CertFindCertificateInStore(
+                store,
+                X509_ASN_ENCODING,
+                0,
+                CERT_FIND_EXISTING,
+                a as *const _,
+                std::ptr::null(),
+            );
+            assert_ne!(CertDeleteCertificateFromStore(found), 0);
+            assert!(!exact_store_contains(store, a));
+            assert!(exact_store_contains(store, b));
+            CertFreeCertificateContext(same_fields);
+            CertFreeCertificateContext(a);
+            CertFreeCertificateContext(b);
+            CertCloseStore(store, 0);
+        }
+    }
+    #[test]
+    fn ca_commands_and_numeric_authorization_results_are_exact() {
+        use super::*;
+        use crate::{core::Error, process::CommandOutcome};
+        let path = Path::new(r"D:\project & user\root.crt");
+        assert_eq!(
+            ca_install_args(path),
+            vec!["-user", "-addstore", "Root", r"D:\project & user\root.crt"]
+        );
+        let id = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            ca_remove_args(id).unwrap(),
+            vec!["-user", "-delstore", "Root", id]
+        );
+        for invalid in [
+            "Caddy Local Authority",
+            "*",
+            "0123",
+            "0123456789abcdef0123456789abcdef0123456z",
+        ] {
+            assert!(ca_remove_args(invalid).is_err());
+        }
+        for code in [1223, 0x800704c7u32 as i32] {
+            assert!(matches!(
+                ca_install_result(
+                    CommandOutcome::Exited {
+                        code: Some(code),
+                        output: "localized output".into()
+                    },
+                    false
+                ),
+                Err(Error::Cancelled(_))
+            ));
+        }
+        assert!(matches!(
+            ca_install_result(CommandOutcome::TimedOut, false),
+            Err(Error::ApprovalRequired(_))
+        ));
+        assert!(
+            ca_install_result(
+                CommandOutcome::Exited {
+                    code: Some(5),
+                    output: "denied".into()
+                },
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            ca_install_result(
+                CommandOutcome::Exited {
+                    code: Some(0),
+                    output: String::new()
+                },
+                false
+            )
+            .is_err()
+        );
+        assert!(ca_install_result(CommandOutcome::TimedOut, true).is_ok());
+    }
     #[test]
     fn listener_ownership() {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();

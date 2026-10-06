@@ -57,11 +57,30 @@ fn response(query: &[u8]) -> Option<Vec<u8>> {
 }
 impl Resolver {
     pub fn start(port: u16) -> Result<Self> {
-        let udp = UdpSocket::bind(("127.0.0.1", port))
-            .map_err(|e| crate::core::Error::Message(format!("DNS UDP {port} conflict: {e}")))?;
+        let (udp, tcp) = if port == 0 {
+            // Windows UDP can allocate an ephemeral port excluded for TCP.
+            // Reserve TCP first and keep it while binding the same UDP port.
+            let mut pair = None;
+            for _ in 0..16 {
+                let tcp = TcpListener::bind(("127.0.0.1", 0))?;
+                if let Ok(udp) = UdpSocket::bind(("127.0.0.1", tcp.local_addr()?.port())) {
+                    pair = Some((udp, tcp));
+                    break;
+                }
+            }
+            pair.ok_or_else(|| {
+                crate::core::Error::Message("No free paired UDP/TCP DNS test port".into())
+            })?
+        } else {
+            let udp = UdpSocket::bind(("127.0.0.1", port)).map_err(|e| {
+                crate::core::Error::Message(format!("DNS UDP {port} conflict: {e}"))
+            })?;
+            let tcp = TcpListener::bind(("127.0.0.1", port)).map_err(|e| {
+                crate::core::Error::Message(format!("DNS TCP {port} conflict: {e}"))
+            })?;
+            (udp, tcp)
+        };
         let port = udp.local_addr()?.port();
-        let tcp = TcpListener::bind(("127.0.0.1", port))
-            .map_err(|e| crate::core::Error::Message(format!("DNS TCP {port} conflict: {e}")))?;
         udp.set_read_timeout(Some(Duration::from_millis(100)))?;
         tcp.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -163,6 +182,44 @@ impl Drop for Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn all_managed_and_unrelated_questions_work_over_udp_and_tcp_and_stop_cleanly() {
+        let resolver = Resolver::start(0).unwrap();
+        let port = resolver.port;
+        for (name, kind, answers, rcode) in [
+            ("foo.test", 1, 1, 0),
+            ("sub.foo.test", 1, 1, 0),
+            ("foo.test", 28, 0, 0),
+            ("example.com", 1, 0, 5),
+            ("test", 1, 0, 5),
+        ] {
+            let q = query(name, kind);
+            let udp = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+            udp.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            udp.send_to(&q, ("127.0.0.1", port)).unwrap();
+            let mut buf = [0; 512];
+            let n = udp.recv(&mut buf).unwrap();
+            let udp_reply = buf[..n].to_vec();
+            let mut tcp = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            tcp.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            tcp.write_all(&(q.len() as u16).to_be_bytes()).unwrap();
+            tcp.write_all(&q).unwrap();
+            let mut len = [0; 2];
+            tcp.read_exact(&mut len).unwrap();
+            let mut reply = vec![0; u16::from_be_bytes(len) as usize];
+            tcp.read_exact(&mut reply).unwrap();
+            assert_eq!(reply, udp_reply);
+            assert_eq!(reply[3] & 15, rcode);
+            assert_eq!(reply[7], answers);
+            if answers == 1 {
+                assert_eq!(&reply[reply.len() - 4..], &[127, 0, 0, 1]);
+            }
+        }
+        drop(resolver);
+        assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+        let restarted = Resolver::start(port).unwrap();
+        assert!(restarted.healthy());
+    }
     fn query(name: &str, t: u16) -> Vec<u8> {
         let mut q = vec![1, 2, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
         for l in name.split('.') {

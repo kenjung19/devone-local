@@ -2,6 +2,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("{0}")]
+    ApprovalRequired(String),
+    #[error("{0}")]
+    Cancelled(String),
+    #[error("{0}")]
+    PolicyConflict(String),
+    #[error("{0}")]
+    NotElevated(String),
+    #[error("{0}")]
     Message(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -11,6 +19,13 @@ pub enum Error {
     Json(#[from] serde_json::Error),
 }
 pub type Result<T> = std::result::Result<T, Error>;
+pub fn helper_exit_code(error: &Error) -> i32 {
+    match error {
+        Error::PolicyConflict(_) => 2,
+        Error::NotElevated(_) => 3,
+        _ => 1,
+    }
+}
 pub fn fail<T>(message: impl Into<String>) -> Result<T> {
     Err(Error::Message(message.into()))
 }

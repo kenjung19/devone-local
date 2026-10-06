@@ -7,7 +7,7 @@ fn main() {
     if let Some(result) = devone::platform::helper_dispatch() {
         if let Err(e) = result {
             eprintln!("{e}");
-            std::process::exit(1)
+            std::process::exit(devone::core::helper_exit_code(&e))
         }
         return;
     }

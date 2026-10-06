@@ -346,6 +346,12 @@ fn stop_caddy_owned(port: u16, pid: u32) -> Result<()> {
     stream.write_all(format!("POST /stop HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes())?;
     Ok(())
 }
+#[derive(Debug)]
+pub enum CommandOutcome {
+    Exited { code: Option<i32>, output: String },
+    TimedOut,
+}
+
 pub fn run_checked(
     binary: &std::path::Path,
     args: &[String],
@@ -353,6 +359,28 @@ pub fn run_checked(
     env: &BTreeMap<String, String>,
     timeout: Duration,
 ) -> Result<String> {
+    match run_bounded(binary, args, cwd, env, timeout)? {
+        CommandOutcome::Exited {
+            code: Some(0),
+            output,
+        } => Ok(output),
+        CommandOutcome::Exited { code, output } => fail(format!(
+            "{} exited with {code:?}: {output}",
+            binary.display()
+        )),
+        CommandOutcome::TimedOut => fail(format!("{} timed out", binary.display())),
+    }
+}
+
+/// Preserve numeric status for Windows authorization without parsing localized
+/// command output. The checked wrapper retains existing command behavior.
+pub fn run_bounded(
+    binary: &std::path::Path,
+    args: &[String],
+    cwd: &std::path::Path,
+    env: &BTreeMap<String, String>,
+    timeout: Duration,
+) -> Result<CommandOutcome> {
     // Redirect output to temporary files: no pipe deadlock on large output.
     let id = uuid::Uuid::new_v4();
     let out = std::env::temp_dir().join(format!("devone-{id}.out"));
@@ -379,18 +407,15 @@ pub fn run_checked(
             if let Some(status) = child.try_wait()? {
                 let output = std::fs::read_to_string(&out).unwrap_or_default()
                     + &std::fs::read_to_string(&err).unwrap_or_default();
-                if !status.success() {
-                    return fail(format!(
-                        "{} exited with {status}: {output}",
-                        binary.display()
-                    ));
-                }
-                return Ok(output);
+                return Ok(CommandOutcome::Exited {
+                    code: status.code(),
+                    output,
+                });
             }
             if Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
-                return fail(format!("{} timed out", binary.display()));
+                return Ok(CommandOutcome::TimedOut);
             }
             std::thread::sleep(Duration::from_millis(50));
         }

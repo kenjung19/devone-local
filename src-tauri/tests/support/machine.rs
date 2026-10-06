@@ -5,6 +5,8 @@ use devone::{
     tls::{self, CaddyTls, TlsProvider},
 };
 use std::{collections::BTreeSet, path::PathBuf};
+static CANCELLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SIGNAL_HANDLER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 pub fn user_roots() -> Result<BTreeSet<String>> {
     use winreg::{RegKey, enums::*};
@@ -29,6 +31,10 @@ pub struct MachineGuard {
 }
 impl MachineGuard {
     pub fn new(app: Application) -> Result<Self> {
+        if !*SIGNAL_HANDLER.get_or_init(|| ctrlc::set_handler(|| {
+            CANCELLED.store(true,std::sync::atomic::Ordering::Release);
+            eprintln!("USER CANCELLED: native acceptance will finish exact cleanup before exit; dismiss any Windows confirmation");
+        }).is_ok()) { return fail("Cannot install acceptance cancellation cleanup handler; no machine mutation authorized"); }
         Ok(Self {
             app,
             certificates: vec![],
@@ -36,6 +42,9 @@ impl MachineGuard {
             cleaned: false,
             dns_created: false,
         })
+    }
+    pub fn cancelled(&self) -> bool {
+        CANCELLED.load(std::sync::atomic::Ordering::Acquire)
     }
     /// Register before trust installation, so partial installation is covered.
     /// A private immutable copy survives CA recreation or a changed source file.
@@ -123,5 +132,49 @@ impl Drop for MachineGuard {
                 panic!("ACCEPTANCE CLEANUP FAILED: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use devone::{app::Options, config::Home};
+    #[test]
+    fn untrusted_guard_cleanup_is_noop_and_changed_capture_is_refused() {
+        let before = user_roots().unwrap();
+        let d = tempfile::tempdir().unwrap();
+        let home = Home::new(d.path());
+        let app = Application::open_with_options(
+            home.clone(),
+            Options {
+                system_setup: false,
+                autostart: false,
+            },
+        )
+        .unwrap();
+        let path = CaddyTls.ca_path(&home);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = include_bytes!("../fixtures/ca-owned.crt");
+        std::fs::write(&path, original).unwrap();
+        assert!(
+            !devone::platform::ca_trusted(&path),
+            "Public fixture unexpectedly trusted; refuse to acquire it"
+        );
+        let mut guard = MachineGuard::new(app).unwrap();
+        guard.track_ca().unwrap();
+        let capture = guard.certificates[0].0.clone();
+        std::fs::write(&capture, b"unknown changed identity").unwrap();
+        assert!(
+            guard
+                .cleanup()
+                .unwrap_err()
+                .to_string()
+                .contains("refusing removal")
+        );
+        assert_eq!(user_roots().unwrap(), before);
+        std::fs::write(&capture, original).unwrap();
+        guard.cleanup().unwrap();
+        guard.cleanup().unwrap();
+        assert_eq!(user_roots().unwrap(), before);
     }
 }

@@ -1,3 +1,5 @@
+#[path = "support/https.rs"]
+mod https;
 #[path = "support/machine.rs"]
 mod machine;
 use devone::{
@@ -22,6 +24,7 @@ fn disposable_current_user_ca_and_system_https() {
 }
 
 fn php_acceptance(system_ca: bool) {
+    let roots_before = machine::user_roots().unwrap();
     let d = tempfile::tempdir().unwrap();
     let home = Home::new(d.path());
     let mut a = Application::open_with_options(
@@ -84,15 +87,43 @@ fn php_acceptance(system_ca: bool) {
         .unwrap();
     for (name, r) in ["accept-php-a", "accept-php-b"].into_iter().zip(&versions) {
         assert_eq!(
-            client
-                .get(format!("https://{name}.test"))
-                .send()
+            https::ready_get(&client, &format!("https://{name}.test"))
                 .unwrap()
                 .text()
                 .unwrap(),
             r.manifest.version
         );
     }
+    let unrelated =
+        reqwest::Certificate::from_pem(include_bytes!("fixtures/ca-unrelated.crt")).unwrap();
+    let wrong_ca = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .tls_certs_only([unrelated])
+        .resolve("accept-php-a.test", "127.0.0.1:443".parse().unwrap())
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    assert!(
+        wrong_ca.get("https://accept-php-a.test").send().is_err(),
+        "HTTPS must reject another CA even with the same subject"
+    );
+    let hostname_client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .tls_certs_only([reqwest::Certificate::from_pem(
+            &std::fs::read(CaddyTls.ca_path(&home)).unwrap(),
+        )
+        .unwrap()])
+        .resolve("wrong-host.example", "127.0.0.1:443".parse().unwrap())
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    assert!(
+        hostname_client
+            .get("https://wrong-host.example")
+            .send()
+            .is_err(),
+        "HTTPS must not accept an unrelated hostname"
+    );
     let pid = a
         .snapshot()
         .unwrap()
@@ -145,7 +176,9 @@ fn php_acceptance(system_ca: bool) {
         guard.track_ca().unwrap();
         let path = CaddyTls.ca_path(&home);
         assert!(!devone::platform::ca_trusted(&path));
-        CaddyTls.trust(&guard.app.store, &home).unwrap();
+        if !interactive_trust(&mut guard, &home) {
+            return;
+        }
         assert!(devone::platform::ca_trusted(&path));
         let curl = devone::platform::system_executable("curl.exe").unwrap();
         let output = devone::process::run_checked(
@@ -215,7 +248,48 @@ fn php_acceptance(system_ca: bool) {
         assert!(!devone::platform::ca_trusted(&path));
         guard.cleanup().unwrap();
     } else {
+        let old = devone::tls::fingerprint(&CaddyTls.ca_path(&home)).unwrap();
+        a.recreate_ca(true).unwrap();
+        assert_ne!(
+            old,
+            devone::tls::fingerprint(&CaddyTls.ca_path(&home)).unwrap()
+        );
+        assert!(!devone::platform::ca_trusted(&CaddyTls.ca_path(&home)));
         a.shutdown().unwrap();
+        assert_eq!(
+            machine::user_roots().unwrap(),
+            roots_before,
+            "Noninteractive HTTPS must never alter the Root store"
+        );
+    }
+}
+
+// Authorization is a separate optional certification result. Only recognized
+// approval/cancel outcomes are skipped; actual backend/cleanup errors still fail.
+fn interactive_trust(guard: &mut machine::MachineGuard, home: &Home) -> bool {
+    if guard.cancelled() {
+        guard.cleanup().unwrap();
+        eprintln!("USER CANCELLED: no trust installation started");
+        return false;
+    }
+    match CaddyTls.trust(&guard.app.store, home) {
+        Ok(()) if guard.cancelled() => {
+            guard.cleanup().unwrap();
+            eprintln!("USER CANCELLED: exact trust cleanup completed");
+            false
+        }
+        Ok(()) => true,
+        Err(devone::core::Error::ApprovalRequired(message)) => {
+            guard.cleanup().unwrap();
+            eprintln!("INTERACTIVE APPROVAL REQUIRED: {message}");
+            false
+        }
+        Err(devone::core::Error::Cancelled(message)) => {
+            guard.cleanup().unwrap();
+            eprintln!("USER CANCELLED: {message}");
+            false
+        }
+        Err(error) => panic!("System CA backend failed: {error}"),
     }
 }
 
@@ -250,10 +324,12 @@ fn system_ca_guard_cleans_after_panic() {
     guard.app.set_default(caddy.reference()).unwrap();
     devone::setup::prepare_ca(&guard.app.store, &home).unwrap();
     guard.track_ca().unwrap();
+    if !interactive_trust(&mut guard, &home) {
+        return;
+    }
     let installed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let observed_install = installed.clone();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        CaddyTls.trust(&guard.app.store, &home).unwrap();
         assert!(devone::platform::ca_trusted(&CaddyTls.ca_path(&home)));
         observed_install.store(true, std::sync::atomic::Ordering::Release);
         panic!("controlled acceptance failure after CA installation");
@@ -305,10 +381,12 @@ fn disposable_elevated_windows_dns_policy_lifecycle() {
         std::env::var("DEVONE_ACCEPT_SYSTEM_DNS").as_deref(),
         Ok("1")
     );
-    assert!(
-        unsafe { windows_sys::Win32::UI::Shell::IsUserAnAdmin() } != 0,
-        "Run scripts\\acceptance\\windows-dns.cmd from CMD as Administrator; no policy was changed"
-    );
+    if unsafe { windows_sys::Win32::UI::Shell::IsUserAnAdmin() } == 0 {
+        eprintln!(
+            "SKIPPED - NOT ELEVATED: use scripts\\acceptance\\windows-dns.cmd from CMD as Administrator; no policy was changed"
+        );
+        return;
+    }
     use windows_sys::Win32::NetworkManagement::Dns::*;
     fn query(host: &str) -> Vec<[u8; 4]> {
         let name: Vec<u16> = host.encode_utf16().chain(Some(0)).collect();
@@ -351,7 +429,17 @@ fn disposable_elevated_windows_dns_policy_lifecycle() {
         "Port 53 unavailable; foreign listeners were not touched"
     );
     guard.track_dns().unwrap();
+    if guard.cancelled() {
+        guard.cleanup().unwrap();
+        eprintln!("USER CANCELLED: no DNS mutation started");
+        return;
+    }
     devone::platform::configure_wildcard_elevated(false).unwrap();
+    if guard.cancelled() {
+        guard.cleanup().unwrap();
+        eprintln!("USER CANCELLED: exact DNS cleanup completed");
+        return;
+    }
     assert!(devone::platform::wildcard_ready());
     devone::platform::configure_wildcard_elevated(false).unwrap(); // owned policy is idempotent
     let host = format!("accept-{}.test", uuid::Uuid::new_v4().simple());

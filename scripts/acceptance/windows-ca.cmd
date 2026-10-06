@@ -4,7 +4,8 @@ pushd "%~dp0..\.."
 call scripts\workspace-env.cmd
 set "CARGO_BUILD_JOBS=1"
 set "DEVONE_ACCEPT_SYSTEM_CA=1"
-echo Explicit current-user CA acceptance. Approve only this test's Windows certificate prompt.
+echo USER APPROVAL REQUIRED - Explicit optional current-user CA certification.
+echo Approve only this test's Windows certificate prompt. Cancellation is supported.
 echo Exact disposable CA path and SHA-256 are printed before installation.
 echo The cleanup guard removes only its exact certificate and verifies Root baseline.
 echo Catalog fixtures are downloaded if DEVONE_ACCEPT_PHP_A, DEVONE_ACCEPT_PHP_B or DEVONE_CADDY_SOURCE are unset.

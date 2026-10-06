@@ -40,6 +40,21 @@ fn bounded_commands_capture_errors_and_timeouts() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("timed out"));
+    use devone::process::{CommandOutcome, run_bounded};
+    assert!(
+        matches!(run_bounded(&fixture(),&["fail".into()],d.path(),&BTreeMap::new(),Duration::from_secs(5)).unwrap(),CommandOutcome::Exited { code:Some(code),.. } if code != 0)
+    );
+    assert!(matches!(
+        run_bounded(
+            &fixture(),
+            &["sleep".into()],
+            d.path(),
+            &BTreeMap::new(),
+            Duration::from_millis(50)
+        )
+        .unwrap(),
+        CommandOutcome::TimedOut
+    ));
 }
 #[test]
 fn supervisor_records_unexpected_exit_and_captures_logs() {
