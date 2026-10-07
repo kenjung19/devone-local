@@ -1,5 +1,5 @@
 import { ErrorNotice } from "./ErrorNotice";
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import type { Snapshot, Action } from "../contracts";
 import { bridge } from "../bridge";
 export function DatabaseManager({
@@ -26,11 +26,21 @@ export function DatabaseManager({
   const [confirmation, setConfirmation] = useState("");
   const [file, setFile] = useState("");
   const [error, setError] = useState("");
+  const [revealing, setRevealing] = useState(false);
+  const revealRequest = useRef(0);
+  const managed = data.developer?.managed_databases;
+  useEffect(() => {
+    revealRequest.current += 1;
+    setRevealed(null);
+    setRevealing(false);
+  }, [managed]);
   const [revealed, setRevealed] = useState<{
     key: string;
     password: string;
   } | null>(null);
   const reveal = async (runtime_id: string, database_name: string) => {
+    const request = ++revealRequest.current;
+    setRevealing(true);
     setRevealed(null);
     try {
       const result = await bridge.execute({
@@ -42,13 +52,16 @@ export function DatabaseManager({
         confirmation: null,
         path: null,
       });
+      if (revealRequest.current !== request) return;
       setRevealed({
         key: `${runtime_id}:${database_name}`,
         password: result.credential ?? "",
       });
       setError("");
     } catch (e) {
-      setError(String(e));
+      if (revealRequest.current === request) setError(String(e));
+    } finally {
+      if (revealRequest.current === request) setRevealing(false);
     }
   };
   const admin = (
@@ -308,8 +321,9 @@ export function DatabaseManager({
                   Delete…
                 </button>
                 <button
-                  disabled={busy}
+                  disabled={busy || revealing}
                   onClick={() => void reveal(b.runtime_id, b.database_name)}
+                  aria-busy={revealing}
                 >
                   Reveal Password
                 </button>
@@ -372,7 +386,7 @@ export function DatabaseManager({
             <p role="alert">
               {target.operation === "delete"
                 ? "This permanently deletes this managed database and its managed user. Backups are retained."
-                : "Only choose SQL you trust. DEVONE backups replace dumped tables and include routines, events and triggers. Restoring may overwrite existing data; errors may leave partial changes. Back up first and stop the project."}
+                : "Only choose SQL you trust. DEVONE backups replace dumped tables and include routines, events and triggers. Restoring may overwrite existing data; errors may leave partial changes. Back up first and stop the project. Routine/event/trigger DEFINER accounts are preserved; restore to the same managed database and user. A different target/user may fail midway."}
             </p>
             {target.operation === "restore" && (
               <label>

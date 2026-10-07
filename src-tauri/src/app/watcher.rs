@@ -38,6 +38,7 @@ fn poll_discovery(
     app: &Arc<Mutex<Application>>,
     path: &Path,
     known: &mut BTreeMap<PathBuf, String>,
+    retry: &mut Option<Instant>,
 ) {
     // Read project metadata before taking the application lock, for events and polls alike.
     let state = discovery_state(path);
@@ -45,9 +46,12 @@ fn poll_discovery(
         match state {
             Ok(state) => {
                 app.issues.retain(|i| !i.starts_with("Discovery: Poll:"));
-                if state != *known {
+                if state != *known || retry.is_some_and(|due| Instant::now() >= due) {
                     if let Err(e) = app.scan() {
                         app.record_issue(format!("Discovery: {e}"));
+                        *retry = Some(Instant::now() + Duration::from_secs(60));
+                    } else {
+                        *retry = None;
                     }
                     // A failed scan must not retry service starts every five seconds.
                     *known = state;
@@ -73,6 +77,7 @@ pub fn watch(app: Arc<Mutex<Application>>) -> Result<WatchHandle> {
         .watch(&path, notify::RecursiveMode::NonRecursive)
         .map_err(|e| Error::Message(e.to_string()))?;
     let mut known = discovery_state(&path)?;
+    let mut retry = None;
     let stop = Arc::new(AtomicBool::new(false));
     let running = stop.clone();
     let thread = std::thread::spawn(move || {
@@ -85,7 +90,7 @@ pub fn watch(app: Arc<Mutex<Application>>) -> Result<WatchHandle> {
                     while rx.try_recv().is_ok() {}
                     match event {
                         Ok(_) => {
-                            poll_discovery(&app, &path, &mut known);
+                            poll_discovery(&app, &path, &mut known, &mut retry);
                             last_scan = Instant::now();
                         }
                         Err(e) => {
@@ -108,7 +113,7 @@ pub fn watch(app: Arc<Mutex<Application>>) -> Result<WatchHandle> {
             // Reconcile these without subscribing to dependency/log trees or
             // retrying failed starts when discovery metadata has not changed.
             if last_scan.elapsed() >= Duration::from_secs(5) {
-                poll_discovery(&app, &path, &mut known);
+                poll_discovery(&app, &path, &mut known, &mut retry);
                 last_scan = Instant::now();
             }
         }
@@ -147,7 +152,8 @@ mod tests {
             .unwrap(),
         ));
         let mut known = discovery_state(&home.www()).unwrap();
-        poll_discovery(&app, &home.path("missing"), &mut known);
+        let mut retry = None;
+        poll_discovery(&app, &home.path("missing"), &mut known, &mut retry);
         assert!(
             app.lock()
                 .unwrap()
@@ -155,11 +161,11 @@ mod tests {
                 .iter()
                 .any(|i| i.starts_with("Discovery: Poll:"))
         );
-        poll_discovery(&app, &home.www(), &mut known);
+        poll_discovery(&app, &home.www(), &mut known, &mut retry);
         assert!(app.lock().unwrap().issues.is_empty());
         std::fs::create_dir(home.www().join("new-site")).unwrap();
         app.lock().unwrap().store.conn.execute_batch("CREATE TRIGGER reject_site BEFORE INSERT ON sites BEGIN SELECT RAISE(FAIL,'scan failed'); END;").unwrap();
-        poll_discovery(&app, &home.www(), &mut known);
+        poll_discovery(&app, &home.www(), &mut known, &mut retry);
         assert_eq!(known, discovery_state(&home.www()).unwrap());
         assert!(
             app.lock()
@@ -174,10 +180,22 @@ mod tests {
             .conn
             .execute_batch("DROP TRIGGER reject_site;")
             .unwrap();
-        poll_discovery(&app, &home.www(), &mut known);
+        poll_discovery(&app, &home.www(), &mut known, &mut retry);
         assert!(
             app.lock().unwrap().sites().unwrap().is_empty(),
             "unchanged event retried failed scan"
+        );
+        assert!(retry.is_some());
+        retry = Some(Instant::now());
+        poll_discovery(&app, &home.www(), &mut known, &mut retry);
+        assert_eq!(app.lock().unwrap().sites().unwrap().len(), 1);
+        assert!(retry.is_none());
+        assert!(
+            !app.lock()
+                .unwrap()
+                .issues
+                .iter()
+                .any(|i| i.contains("scan failed"))
         );
     }
 

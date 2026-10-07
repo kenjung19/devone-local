@@ -642,14 +642,49 @@ pub fn remove(store: &Store, home: &Home, sites: &[Site], id: &str, version: &st
         })?;
         return Err(error.into());
     }
-    if store.setting(&format!("tool.default.{id}"))?.as_deref() == Some(version) {
-        store.conn.execute(
-            "DELETE FROM settings WHERE key=?1",
-            [format!("tool.default.{id}")],
-        )?;
+    let cleanup = (|| -> Result<()> {
+        if store.setting(&format!("tool.default.{id}"))?.as_deref() == Some(version) {
+            store.conn.execute(
+                "DELETE FROM settings WHERE key=?1",
+                [format!("tool.default.{id}")],
+            )?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = cleanup {
+        tracing::warn!(%error, %id, "removed tool default cleanup failed");
     }
-    std::fs::remove_dir_all(trash)?;
+    if let Err(error) = crate::phase3::files::cleanup(&home.path("cache"), &trash) {
+        tracing::warn!(%error, path=%trash.display(), "removed tool trash cleanup deferred");
+    }
     Ok(())
+}
+pub fn sweep_removed(home: &Home) {
+    let cache = home.path("cache");
+    if let Err(error) = crate::tls::authority::safe_path(home, &cache) {
+        tracing::warn!(%error,"removed trash sweep skipped");
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(&cache) else {
+        return;
+    };
+    for entry in entries {
+        let result = (|| -> Result<()> {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with("removed-")
+                || crate::platform::is_link(&entry.path())?
+                || !entry.file_type()?.is_dir()
+            {
+                return Ok(());
+            }
+            crate::phase3::files::cleanup(&cache, &entry.path())
+        })();
+        if let Err(error) = result {
+            tracing::warn!(%error,"removed trash sweep skipped entry");
+        }
+    }
 }
 
 fn validation_environment() -> BTreeMap<String, String> {
@@ -692,6 +727,43 @@ pub fn migrate_defaults(store: &Store) -> Result<()> {
 #[cfg(test)]
 mod removal_tests {
     use super::*;
+    #[test]
+    fn committed_tool_remove_succeeds_even_if_default_cleanup_fails() {
+        let d = tempfile::tempdir().unwrap();
+        let home = Home::new(d.path());
+        home.ensure().unwrap();
+        let store = Store::open(&home.path("state.db")).unwrap();
+        let tool = available().unwrap().remove(0);
+        let root = home.path(&format!("tools/{}/{}", tool.id, tool.version));
+        let entry = root.join(&tool.entry);
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::fs::write(&entry, "tool").unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO tools VALUES(?1,?2)",
+                rusqlite::params![
+                    format!("{}:{}", tool.id, tool.version),
+                    serde_json::to_string(&tool).unwrap()
+                ],
+            )
+            .unwrap();
+        store
+            .set_setting(&format!("tool.default.{}", tool.id), &tool.version)
+            .unwrap();
+        store.conn.execute_batch("CREATE TRIGGER reject_default BEFORE DELETE ON settings BEGIN SELECT RAISE(FAIL,'cleanup failed'); END;").unwrap();
+        remove(&store, &home, &[], &tool.id, &tool.version).unwrap();
+        assert!(installed(&store).unwrap().is_empty());
+        assert!(!root.exists());
+        let trash = home.path("cache/removed-leftover");
+        std::fs::create_dir(&trash).unwrap();
+        std::fs::write(trash.join("file"), "trash").unwrap();
+        let retained = home.path("cache/unrelated");
+        std::fs::create_dir(&retained).unwrap();
+        sweep_removed(&home);
+        assert!(!trash.exists());
+        assert!(retained.exists());
+    }
     #[test]
     fn failed_registry_delete_restores_tool_files_for_retry() {
         let d = tempfile::tempdir().unwrap();

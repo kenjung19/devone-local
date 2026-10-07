@@ -27,8 +27,11 @@ export function ImportDialog({
   const [version, setVersion] = useState("");
   const [source, setSource] = useState("");
   const currentSource = useRef("");
+  const inspection = useRef(0);
   const changeSource = useCallback((value: string) => {
     currentSource.current = value;
+    inspection.current += 1;
+    setInspecting(false);
     setSource(value);
     setVersion("");
   }, []);
@@ -139,17 +142,26 @@ export function ImportDialog({
             setInspecting(true);
             setErr("");
             const inspectedSource = source;
+            const request = ++inspection.current;
             void bridge
               .inspectImport(kind, source)
               .then((m) => {
-                if (currentSource.current === inspectedSource)
+                if (
+                  inspection.current === request &&
+                  currentSource.current === inspectedSource
+                )
                   setVersion(m.version);
               })
               .catch((e) => {
-                if (currentSource.current === inspectedSource)
+                if (
+                  inspection.current === request &&
+                  currentSource.current === inspectedSource
+                )
                   setErr(String(e));
               })
-              .finally(() => setInspecting(false));
+              .finally(() => {
+                if (inspection.current === request) setInspecting(false);
+              });
           }}
         >
           {inspecting ? "Detecting…" : "Detect version"}

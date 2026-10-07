@@ -100,6 +100,42 @@ async function input(placeholder: string, value: string) {
   });
 }
 describe("runtime dialogs", () => {
+  it("a stale inspection cannot finish a newer inspection", async () => {
+    const results: ((m: Manifest) => void)[] = [];
+    vi.mocked(bridge.inspectImport).mockImplementation(
+      () => new Promise((ok) => results.push(ok)),
+    );
+    await act(async () =>
+      root.render(
+        <ImportDialog
+          kind="php"
+          data={data}
+          busy={false}
+          error=""
+          close={() => {}}
+          act={async () => true}
+        />,
+      ),
+    );
+    await input("Absolute path to extracted distribution", "D:/first");
+    await click("Detect version");
+    await input("Absolute path to extracted distribution", "D:/second");
+    await click("Detect version");
+    await act(async () => results[0](runtime.manifest));
+    expect(
+      [...host.querySelectorAll("button")].find(
+        (b) => b.textContent === "Detecting…",
+      )?.disabled,
+    ).toBe(true);
+    await act(async () =>
+      results[1]({ ...runtime.manifest, version: "8.5.0" }),
+    );
+    expect(
+      host.querySelector<HTMLInputElement>(
+        'input[placeholder="Version reported by --version"]',
+      )!.value,
+    ).toBe("8.5.0");
+  });
   it.each([false, true])(
     "closes Import and PHP only after success=%s",
     async (success) => {
@@ -168,6 +204,61 @@ describe("runtime dialogs", () => {
   });
 });
 describe("credential and polling state", () => {
+  it("disables reveal while pending and clears passwords when managed records change", async () => {
+    let resolve!: (value: Awaited<ReturnType<typeof bridge.execute>>) => void;
+    vi.mocked(bridge.execute).mockImplementation(
+      () =>
+        new Promise((ok) => {
+          resolve = ok;
+        }),
+    );
+    const managed = [
+      {
+        runtime_id: "mysql:8.4",
+        database_name: "demo",
+        username: "demo",
+        status: "ready",
+      },
+    ];
+    const developer = {
+      managed_databases: managed,
+      backups: [],
+      editors: [],
+    } as unknown as NonNullable<Snapshot["developer"]>;
+    const render = async (value: typeof developer) =>
+      act(async () =>
+        root.render(
+          <DatabaseManager
+            data={{ ...data, developer: value }}
+            busy={false}
+            act={async () => true}
+            logs={() => {}}
+          />,
+        ),
+      );
+    await render(developer);
+    await click("Reveal Password");
+    expect(
+      [...host.querySelectorAll("button")].find(
+        (b) => b.textContent === "Reveal Password",
+      )?.disabled,
+    ).toBe(true);
+    await act(async () =>
+      resolve({ snapshot: data, message: null, credential: "pending-secret" }),
+    );
+    expect(host.textContent).toContain("pending-secret");
+    await render({
+      ...developer,
+      managed_databases: [...developer.managed_databases],
+    });
+    expect(host.textContent).not.toContain("pending-secret");
+    await click("Reveal Password");
+    await render({ ...developer, managed_databases: [] });
+    await act(async () =>
+      resolve({ snapshot: data, message: null, credential: "stale-secret" }),
+    );
+    expect(host.textContent).not.toContain("stale-secret");
+  });
   it("shows blocked CA recovery only in that state and requires confirmation", async () => {
     const execute = vi.fn(async () => true);
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);

@@ -439,7 +439,16 @@ pub fn backup(app: &mut Application, id: &str, name: &str) -> Result<Backup> {
         status: "completed".into(),
     };
     std::fs::rename(&temporary, &file)?;
-    app.store.conn.execute(
+    register_backup(&app.store, &file, &backup)?;
+    crate::runtime::atomic_write(
+        &file.with_extension("metadata.json"),
+        &serde_json::to_vec_pretty(&backup)?,
+    )?;
+    Ok(backup)
+}
+fn register_backup(store: &Store, file: &Path, backup: &Backup) -> Result<()> {
+    let mut unregistered = PartialFile(file.to_path_buf());
+    store.conn.execute(
         "INSERT INTO database_backups VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
         rusqlite::params![
             backup.id,
@@ -453,11 +462,8 @@ pub fn backup(app: &mut Application, id: &str, name: &str) -> Result<Backup> {
             backup.status
         ],
     )?;
-    crate::runtime::atomic_write(
-        &file.with_extension("metadata.json"),
-        &serde_json::to_vec_pretty(&backup)?,
-    )?;
-    Ok(backup)
+    unregistered.0 = std::path::PathBuf::new();
+    Ok(())
 }
 pub fn validate_restore_source(path: &Path) -> Result<()> {
     if !path.is_absolute()
@@ -525,6 +531,9 @@ fn restore_timeout(size: u64) -> Duration {
 struct PartialFile(std::path::PathBuf);
 impl Drop for PartialFile {
     fn drop(&mut self) {
+        if self.0.as_os_str().is_empty() {
+            return;
+        }
         if let Err(error) = std::fs::remove_file(&self.0)
             && error.kind() != std::io::ErrorKind::NotFound
         {
@@ -554,6 +563,34 @@ fn file_digest(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod backup_path_tests {
     use super::*;
+    #[test]
+    fn failed_backup_insert_removes_final_sql_without_an_orphan() {
+        let d = tempfile::tempdir().unwrap();
+        let store = Store::open(&d.path().join("db")).unwrap();
+        let file = d.path().join("dump.sql");
+        std::fs::write(&file, "SQL").unwrap();
+        store.conn.execute_batch("CREATE TRIGGER reject_backup BEFORE INSERT ON database_backups BEGIN SELECT RAISE(FAIL,'record failed'); END;").unwrap();
+        let backup = Backup {
+            id: "id".into(),
+            r#type: "mysql_sql".into(),
+            database: "demo".into(),
+            runtime: "mysql:8".into(),
+            path: file.to_string_lossy().into(),
+            size: 3,
+            sha256: "hash".into(),
+            created_at: 0,
+            status: "completed".into(),
+        };
+        assert!(register_backup(&store, &file, &backup).is_err());
+        assert!(!file.exists());
+        store
+            .conn
+            .execute_batch("DROP TRIGGER reject_backup")
+            .unwrap();
+        std::fs::write(&file, "SQL").unwrap();
+        register_backup(&store, &file, &backup).unwrap();
+        assert!(file.exists());
+    }
     #[test]
     fn streaming_checksum_timeout_and_partial_cleanup() {
         let d = tempfile::tempdir().unwrap();

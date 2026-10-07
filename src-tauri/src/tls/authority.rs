@@ -25,7 +25,7 @@ pub fn root_path(home: &Home) -> PathBuf {
 pub fn key_path(home: &Home) -> PathBuf {
     home.path("certs/devone-ca/root.key")
 }
-pub(super) fn safe_path(home: &Home, path: &Path) -> Result<()> {
+pub(crate) fn safe_path(home: &Home, path: &Path) -> Result<()> {
     if !path.starts_with(home.root()) {
         return fail("CA path escapes Home");
     }
@@ -127,9 +127,10 @@ pub fn ensure(home: &Home) -> Result<()> {
             && !crate::platform::is_link(&entry.path())?
             && entry.file_type()?.is_dir()
         {
-            safe_path(home, &entry.path())?;
             // Check descendants too: recursive removal must never traverse a link.
-            remove_staging(home, &entry.path())?;
+            if let Err(error) = remove_staging(home, &entry.path()) {
+                tracing::warn!(%error, path=%entry.path().display(), "abandoned CA staging cleanup skipped");
+            }
         }
     }
     let directory = home.path("certs/devone-ca");
@@ -187,6 +188,29 @@ fn remove_staging(home: &Home, path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn undeletable_stale_staging_does_not_block_ca_ensure() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let home = Home::new(d.path());
+        home.ensure().unwrap();
+        let stale = home.path("certs/.devone-ca-locked");
+        std::fs::create_dir(&stale).unwrap();
+        let key = stale.join("root.key");
+        std::fs::write(&key, "locked stale key").unwrap();
+        let handle = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&key)
+            .unwrap();
+        ensure(&home).unwrap();
+        assert!(key.exists());
+        validate(&home).unwrap();
+        drop(handle);
+        ensure(&home).unwrap();
+        assert!(!stale.exists());
+    }
     #[test]
     fn ensure_removes_abandoned_private_key_staging_only() {
         let d = tempfile::tempdir().unwrap();

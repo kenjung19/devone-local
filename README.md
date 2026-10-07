@@ -47,6 +47,8 @@ Initialize/start MySQL, then refresh its database list. Managed databases suppor
 
 Backups include table drop/create statements, routines, events and triggers, so they can restore over the same managed database. Restore requires trusted SQL and a typed target name. It can replace existing tables/data; failures may leave partial changes. Routine/trigger restoration also depends on the engine's permissions and binary logging configuration; DEVONE does not grant global privileges or change those settings. Back up first and use a disposable target when verifying a restore. Automatic scheduling and retention deletion are disabled.
 
+Database restore preserves SQL `DEFINER` clauses for routines, events and triggers. Restore these backups into the same managed database and user. Restoring into a different database/user can fail after some SQL has already applied because the original definer account or privileges differ; no automatic definer rewriting is performed. Back up the target first.
+
 ## Where data is stored
 
 Home defaults to `%LOCALAPPDATA%\Devone`; Settings shows the actual path. Set `DEVONE_HOME` or pass desktop `--home` with another absolute path before launch. A Home change requires restart.

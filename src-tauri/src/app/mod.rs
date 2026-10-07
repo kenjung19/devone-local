@@ -101,6 +101,7 @@ impl Application {
             .and_then(|()| crate::tls::ensure_ca(&home)
                 .map_err(|e| format!("HTTPS CA initialization failed: {e}. Use Settings → HTTPS to retry."))).err();
         crate::tools::migrate_defaults(&store)?;
+        crate::tools::sweep_removed(&home);
         crate::tools::tasks::load(&home)?;
         crate::phase3::templates::load(&home)?;
         let mut app = Self {

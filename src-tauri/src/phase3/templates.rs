@@ -893,9 +893,10 @@ fn create(
                 overrides.push((k, v));
             }
         }
-        let mut preferences = crate::phase3::preferences::list(&store)?;
-        preferences.entry(site_id.clone()).or_default().created_at = timestamp();
-        let tx = store.conn.transaction()?;
+        let tx = store
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let preferences = creation_preferences(&tx, &site_id)?;
         archive_removed_template_path(&tx, &destination)?;
         crate::projects::reclaim_hostname(
             &tx,
@@ -1033,6 +1034,27 @@ fn create(
     })();
     cleanup_creation(result, &root, &stage_path)
 }
+fn creation_preferences(
+    conn: &rusqlite::Connection,
+    site_id: &str,
+) -> Result<BTreeMap<String, crate::phase3::preferences::Preference>> {
+    let preferences_json: Option<String> = {
+        use rusqlite::OptionalExtension;
+        conn.query_row(
+            "SELECT value FROM settings WHERE key='sites.preferences'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?
+    };
+    let mut preferences: BTreeMap<String, crate::phase3::preferences::Preference> =
+        serde_json::from_str(preferences_json.as_deref().unwrap_or("{}"))?;
+    preferences
+        .entry(site_id.to_string())
+        .or_default()
+        .created_at = timestamp();
+    Ok(preferences)
+}
 fn archive_removed_template_path(conn: &rusqlite::Connection, destination: &Path) -> Result<()> {
     use rusqlite::OptionalExtension;
     let previous: Option<(String, bool)> = conn
@@ -1066,6 +1088,44 @@ fn cleanup_creation(result: Result<()>, root: &Path, staging: &Path) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn creation_preferences_read_after_concurrent_writer_commits() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("db");
+        let mut writer = Store::open(&path).unwrap();
+        let tx = writer
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute(
+            "INSERT INTO settings VALUES('sites.preferences',?1)",
+            [r#"{"existing":{"favorite":true,"opened_at":42,"created_at":1}}"#],
+        )
+        .unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let mut finalizer = Store::background(&path).unwrap();
+            ready_tx.send(()).unwrap();
+            let tx = finalizer
+                .conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            let preferences = creation_preferences(&tx, "created").unwrap();
+            tx.execute(
+                "UPDATE settings SET value=?1 WHERE key='sites.preferences'",
+                [serde_json::to_string(&preferences).unwrap()],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            preferences
+        });
+        ready_rx.recv().unwrap();
+        tx.commit().unwrap();
+        let preferences = thread.join().unwrap();
+        assert!(preferences["existing"].favorite);
+        assert_eq!(preferences["existing"].opened_at, 42);
+        assert!(preferences["created"].created_at > 0);
+    }
     #[test]
     fn template_replacement_archives_removed_identity_and_preserves_old_binding() {
         let d = tempfile::tempdir().unwrap();
