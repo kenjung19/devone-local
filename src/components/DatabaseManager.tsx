@@ -28,12 +28,16 @@ export function DatabaseManager({
   const [error, setError] = useState("");
   const [revealing, setRevealing] = useState(false);
   const revealRequest = useRef(0);
-  const managed = data.developer?.managed_databases;
+  // Polling creates a new array every snapshot; reset only when the set of
+  // managed databases actually changes.
+  const managedKey = (data.developer?.managed_databases ?? [])
+    .map((b) => `${b.runtime_id}:${b.database_name}`)
+    .join("|");
   useEffect(() => {
     revealRequest.current += 1;
     setRevealed(null);
     setRevealing(false);
-  }, [managed]);
+  }, [managedKey]);
   const [revealed, setRevealed] = useState<{
     key: string;
     password: string;

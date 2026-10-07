@@ -118,14 +118,15 @@ pub fn validate(home: &Home) -> Result<()> {
 pub fn ensure(home: &Home) -> Result<()> {
     let certs = home.path("certs");
     safe_path(home, &certs)?;
-    for entry in std::fs::read_dir(&certs)? {
-        let entry = entry?;
+    // Cleanup is best effort: an entry that vanishes or can't be inspected
+    // must not block CA preparation.
+    for entry in std::fs::read_dir(&certs)?.flatten() {
         if entry
             .file_name()
             .to_string_lossy()
             .starts_with(".devone-ca-")
-            && !crate::platform::is_link(&entry.path())?
-            && entry.file_type()?.is_dir()
+            && crate::platform::is_link(&entry.path()).is_ok_and(|link| !link)
+            && entry.file_type().is_ok_and(|t| t.is_dir())
         {
             // Check descendants too: recursive removal must never traverse a link.
             if let Err(error) = remove_staging(home, &entry.path()) {

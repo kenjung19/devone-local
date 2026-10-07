@@ -198,13 +198,8 @@ pub fn dispatch_menu(
     quitting: &Arc<AtomicBool>,
     id: &str,
 ) {
-    if id != "quit" {
-        let core = shared.lock().unwrap_or_else(|e| e.into_inner());
-        if let Err(error) = crate::ipc::tray_action_allowed(&core) {
-            tracing::warn!(%error, action=%id, "tray action blocked");
-            return;
-        }
-    }
+    // Runs on the UI thread: never take the core lock here. Busy/quitting
+    // checks happen in the blocking worker below; Open stays available.
     if id == "open" {
         restore(app);
         return;

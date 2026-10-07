@@ -77,6 +77,9 @@ pub(super) fn recreate_with(
         return fail("Upgrade the legacy HTTPS certificate authority before recreating it");
     }
     resume_recreate(store, home)?;
+    // A failed recreate restores the old files; restore their trust as well.
+    // Recovery starts from a broken chain, so it never re-trusts it.
+    let previously_trusted = !recover && system.trusted(&CaddyTls.ca_path(home));
     let journal = Journal {
         backup: uuid::Uuid::new_v4().to_string(),
         fingerprint: store.setting("tls.ca_fingerprint")?.unwrap_or_default(),
@@ -138,6 +141,11 @@ pub(super) fn recreate_with(
     if let Err(error) = result {
         if let Err(rollback) = resume_recreate(store, home) {
             return fail(format!("{error}; CA recreate rollback failed: {rollback}"));
+        }
+        if previously_trusted && let Err(trust) = trust_with(store, home, system) {
+            return fail(format!(
+                "{error}; previous CA files were restored but trust could not be restored: {trust}"
+            ));
         }
         return Err(error);
     }
@@ -281,6 +289,30 @@ mod tests {
                 .path()
                 .join("caddy/pki/evidence")
                 .is_file())
+        );
+    }
+    #[test]
+    fn failed_recreate_restores_files_and_previous_trust() {
+        let (_d, home, store, system) = fixture();
+        let root = authority::root_path(&home);
+        let old = std::fs::read(&root).unwrap();
+        let result = recreate_with(&store, &home, true, false, &system, || {
+            fail("simulated prepare failure")
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&root).unwrap(), old);
+        assert!(system.trusted(&root));
+        assert_eq!(system.removed.borrow().len(), 1);
+        assert_eq!(
+            store.setting("tls.ca_fingerprint").unwrap().unwrap(),
+            fingerprint(&root).unwrap()
+        );
+        assert!(
+            store
+                .setting("tls.ca_recreate")
+                .unwrap()
+                .unwrap()
+                .is_empty()
         );
     }
     #[test]

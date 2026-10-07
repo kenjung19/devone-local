@@ -247,9 +247,19 @@ describe("credential and polling state", () => {
       resolve({ snapshot: data, message: null, credential: "pending-secret" }),
     );
     expect(host.textContent).toContain("pending-secret");
+    // A poll returns an equal list as a new array: the password must stay.
     await render({
       ...developer,
       managed_databases: [...developer.managed_databases],
+    });
+    expect(host.textContent).toContain("pending-secret");
+    // The managed set actually changes: the password is cleared.
+    await render({
+      ...developer,
+      managed_databases: [
+        ...developer.managed_databases,
+        { ...developer.managed_databases[0], database_name: "other" },
+      ],
     });
     expect(host.textContent).not.toContain("pending-secret");
     await click("Reveal Password");

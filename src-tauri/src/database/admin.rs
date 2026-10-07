@@ -75,7 +75,22 @@ pub fn managed(store: &Store) -> Result<Vec<Managed>> {
     );
     Ok(all)
 }
-fn binding(store: &Store, runtime: &str, name: &str) -> Result<Managed> {
+/// Destructive confirmation must match the stored name exactly, even though
+/// lookup is case-insensitive (MySQL on Windows folds database names).
+fn confirmed_binding(
+    store: &Store,
+    runtime: &str,
+    name: &str,
+    confirmation: &str,
+    message: &str,
+) -> Result<Managed> {
+    let b = binding(store, runtime, name)?;
+    if confirmation != b.database_name {
+        return fail(message);
+    }
+    Ok(b)
+}
+pub(crate) fn binding(store: &Store, runtime: &str, name: &str) -> Result<Managed> {
     if !valid_database(name) {
         return fail("System or unsafe database name rejected");
     }
@@ -228,10 +243,13 @@ fn finish_create(app: &mut Application, b: &Managed) -> Result<()> {
     Ok(())
 }
 pub fn delete(app: &mut Application, id: &str, name: &str, confirmation: &str) -> Result<()> {
-    if confirmation != name {
-        return fail("Type the exact database name to confirm destructive deletion");
-    }
-    let b = binding(&app.store, id, name)?;
+    let b = confirmed_binding(
+        &app.store,
+        id,
+        name,
+        confirmation,
+        "Type the exact database name to confirm destructive deletion",
+    )?;
     let name = b.database_name.as_str();
     if !super::provision::valid_name(&b.username) {
         return fail("Invalid recorded user; no destructive operation performed");
@@ -487,12 +505,13 @@ pub fn restore(
     path: &Path,
     confirmation: &str,
 ) -> Result<()> {
-    if confirmation != name {
-        return fail(
-            "Type target database name to confirm restore. SQL statements may merge/overwrite data and may partially apply on failure",
-        );
-    }
-    let b = binding(&app.store, id, name)?;
+    let b = confirmed_binding(
+        &app.store,
+        id,
+        name,
+        confirmation,
+        "Type target database name to confirm restore. SQL statements may merge/overwrite data and may partially apply on failure",
+    )?;
     let name = b.database_name.as_str();
     validate_restore_source(path)?;
     if let Some(s) = &b.site_id
@@ -635,6 +654,10 @@ mod backup_path_tests {
             .to_string();
         assert!(error.contains("recorded username"));
         assert_eq!(managed(&app.store).unwrap().len(), 1);
+        // Destructive confirmation compares with the stored spelling.
+        assert!(confirmed_binding(&app.store, "mysql:8", "mixedcase", "mixedcase", "x").is_err());
+        let b = confirmed_binding(&app.store, "mysql:8", "MIXEDCASE", "MixedCase", "x").unwrap();
+        assert_eq!(b.database_name, "MixedCase");
     }
     #[test]
     fn first_backup_creates_directories_and_refuses_junction_without_outside_writes() {

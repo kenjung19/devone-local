@@ -22,10 +22,7 @@ impl PortManager {
         let reusable = previous.and_then(|port| TcpListener::bind(("127.0.0.1", port)).ok());
         if let Some(port) = previous
             && reusable.is_none()
-            && !["site:", "php:"]
-                .iter()
-                .any(|prefix| owner.starts_with(prefix))
-            && owner != "caddy-admin"
+            && !may_fall_back(owner)
         {
             let leftover = recorded_listener(store, owner, port)?;
             return fail(format!(
@@ -57,12 +54,16 @@ impl PortManager {
             chosen.ok_or_else(|| crate::core::Error::Message("No unused port available".into()))?
         };
         let port = listener.local_addr()?.port();
+        let fallback_key = format!("ports.fallback.{owner}");
         if let Some(old) = previous
             && old != port
         {
             let issue = format!("Port fallback: {owner} moved from {old} to {port}");
             tracing::warn!(%owner, old_port=old, new_port=port, "managed port fallback");
-            store.set_setting(&format!("ports.fallback.{owner}"), &issue)?;
+            store.set_setting(&fallback_key, &issue)?;
+        } else if previous == Some(port) {
+            // The saved port was reused normally; an earlier fallback is resolved.
+            clear_fallback(store, owner)?;
         }
         store.conn.execute("INSERT INTO port_allocations(owner,port) VALUES(?1,?2) ON CONFLICT(owner) DO UPDATE SET port=excluded.port",rusqlite::params![owner,port])?;
         Ok(Reservation {
@@ -88,7 +89,7 @@ impl PortManager {
         store
             .conn
             .execute("DELETE FROM port_allocations WHERE owner=?1", [owner])?;
-        Ok(())
+        clear_fallback(store, owner)
     }
     pub fn healthy(port: u16) -> bool {
         std::net::TcpStream::connect_timeout(
@@ -98,29 +99,42 @@ impl PortManager {
         .is_ok()
     }
 }
+/// Owners whose port is only consumed by configuration DEVONE regenerates from
+/// live state. Ports written into project files (MySQL, Mailpit SMTP) never move.
+fn may_fall_back(owner: &str) -> bool {
+    ["site:", "php:"]
+        .iter()
+        .any(|prefix| owner.starts_with(prefix))
+        || matches!(owner, "caddy-admin" | "mailpit:web")
+}
+fn clear_fallback(store: &Store, owner: &str) -> Result<()> {
+    store.conn.execute(
+        "DELETE FROM settings WHERE key=?1",
+        [format!("ports.fallback.{owner}")],
+    )?;
+    Ok(())
+}
 fn recorded_listener(store: &Store, owner: &str, port: u16) -> Result<bool> {
+    // Mailpit is a managed tool supervised as `tool:mailpit`; runtimes use
+    // their installation id as both port owner and service key.
+    let service = if owner.starts_with("mailpit:") {
+        "tool:mailpit"
+    } else {
+        owner
+    };
     let pid: Option<u32> = store
         .conn
         .query_row(
             "SELECT pid FROM process_state WHERE service_key=?1",
-            [owner],
+            [service],
             |r| r.get(0),
         )
         .optional()?
         .flatten();
     let pid = pid.or(store
-        .setting(&format!("process.last_pid.{owner}"))?
+        .setting(&format!("process.last_pid.{service}"))?
         .and_then(|p| p.parse().ok()));
     let Some(pid) = pid else {
-        return Ok(false);
-    };
-    let installation = crate::runtime::installed(store)?
-        .into_iter()
-        .find(|r| r.id == owner);
-    let Some(item) = installation else {
-        return Ok(false);
-    };
-    let Some(relative) = item.manifest.binaries.get("server") else {
         return Ok(false);
     };
     let database: String = store
@@ -129,11 +143,24 @@ fn recorded_listener(store: &Store, owner: &str, port: u16) -> Result<bool> {
     let Some(root) = std::path::Path::new(&database).parent() else {
         return Ok(false);
     };
-    Ok(crate::platform::recorded_listener(
-        pid,
-        port,
-        &root.join(&item.relative_path).join(relative),
-    ))
+    let executable = if service == "tool:mailpit" {
+        match crate::tools::find(store, &crate::config::Home::new(root), "mailpit", None) {
+            Ok(path) => path,
+            Err(_) => return Ok(false),
+        }
+    } else {
+        let installation = crate::runtime::installed(store)?
+            .into_iter()
+            .find(|r| r.id == owner);
+        let Some(item) = installation else {
+            return Ok(false);
+        };
+        let Some(relative) = item.manifest.binaries.get("server") else {
+            return Ok(false);
+        };
+        root.join(&item.relative_path).join(relative)
+    };
+    Ok(crate::platform::recorded_listener(pid, port, &executable))
 }
 #[cfg(test)]
 mod tests {
@@ -142,7 +169,7 @@ mod tests {
     fn service_ports_fall_back_without_replacing_foreign_listener_or_fixed_port() {
         let d = tempfile::tempdir().unwrap();
         let store = Store::open(&d.path().join("db")).unwrap();
-        for owner in ["caddy-admin", "php:8.4", "site:demo:web"] {
+        for owner in ["caddy-admin", "php:8.4", "site:demo:web", "mailpit:web"] {
             let foreign = TcpListener::bind(("127.0.0.1", 0)).unwrap();
             let busy = foreign.local_addr().unwrap().port();
             store
@@ -172,13 +199,22 @@ mod tests {
             assert!(
                 issue.contains(&busy.to_string()) && issue.contains(&replacement.port.to_string())
             );
+            // Reusing the new saved port resolves the fallback issue.
+            drop(replacement);
+            drop(PortManager::allocate(&store, owner).unwrap());
+            assert!(
+                store
+                    .setting(&format!("ports.fallback.{owner}"))
+                    .unwrap()
+                    .is_none()
+            );
         }
     }
     #[test]
     fn database_and_mail_ports_never_fall_back_or_change_the_record() {
         let d = tempfile::tempdir().unwrap();
         let store = Store::open(&d.path().join("db")).unwrap();
-        for owner in ["mysql:8.4", "mailpit", "other-persisted-consumer"] {
+        for owner in ["mysql:8.4", "mailpit:smtp", "other-persisted-consumer"] {
             let foreign = TcpListener::bind(("127.0.0.1", 0)).unwrap();
             let busy = foreign.local_addr().unwrap().port();
             store

@@ -15,7 +15,7 @@ export function CaUpgradeNotice({
       Restrict HTTPS trust to .test domains; your existing CA stays trusted until
       the upgrade succeeds.{" "}
       <button
-        disabled={busy || !data.setup.caddy}
+        disabled={busy || !data.setup.caddy || !!data.setup.ca_recovery_needed}
         onClick={() => void act({ type: "upgrade_ca" })}
       >
         Upgrade HTTPS certificate authority

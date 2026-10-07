@@ -170,13 +170,20 @@ fn replace_preserving_metadata(path: &Path, bytes: &[u8]) -> Result<()> {
                 )
             } != 0
             {
+                // Contents are already replaced; a lost attribute is not a
+                // failed write, so only report it.
                 if unsafe { SetFileAttributesW(target.as_ptr(), attributes) } == 0 {
-                    return Err(std::io::Error::last_os_error().into());
+                    tracing::warn!(
+                        error=%std::io::Error::last_os_error(),
+                        "hosts file replaced but its original attributes could not be restored"
+                    );
                 }
                 return Ok(());
             }
             let error = std::io::Error::last_os_error();
-            if attempt == 9 || !matches!(error.raw_os_error(), Some(5 | 32 | 33)) {
+            // 1175 (ERROR_UNABLE_TO_REMOVE_REPLACED) is how ReplaceFile reports
+            // a sharing lock from AV/DNS client; the original file is intact.
+            if attempt == 9 || !matches!(error.raw_os_error(), Some(5 | 32 | 33 | 1175)) {
                 return Err(error.into());
             }
             std::thread::sleep(std::time::Duration::from_millis(50));

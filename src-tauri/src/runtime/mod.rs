@@ -564,7 +564,11 @@ pub fn remove(store: &Store, home: &Home, reference: &RuntimeRef) -> Result<()> 
         let _ = std::fs::rename(trash, root);
         return Err(e.into());
     }
-    std::fs::remove_dir_all(trash)?;
+    // The removal is committed. A locked file only delays purging; the
+    // startup sweep of cache/removed-* finishes it.
+    if let Err(error) = std::fs::remove_dir_all(&trash) {
+        tracing::warn!(%error, path=%trash.display(), "runtime trash purge deferred");
+    }
     Ok(())
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

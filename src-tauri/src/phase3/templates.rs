@@ -909,8 +909,16 @@ fn create(
             tx.execute("INSERT INTO site_runtime_overrides(site_id,kind,version) VALUES(?1,?2,?3) ON CONFLICT(site_id,kind) DO UPDATE SET version=excluded.version", rusqlite::params![site_id,k,v])?;
         }
         tx.execute("INSERT INTO settings(key,value) VALUES('sites.preferences',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [serde_json::to_string(&preferences)?])?;
-        tx.commit()?;
+        // Publish the folder while the transaction still holds the write lock:
+        // a failed rename rolls back the archive of the removed project's
+        // identity, and a failed commit moves the folder back to staging.
         std::fs::rename(&project, &destination)?;
+        if let Err(error) = tx.commit() {
+            if let Err(undo) = std::fs::rename(&destination, &project) {
+                tracing::error!(error=%undo, "could not return unregistered project to staging");
+            }
+            return Err(error.into());
+        }
         {
             let mut all = jobs().lock().unwrap_or_else(|e| e.into_inner());
             let j = all

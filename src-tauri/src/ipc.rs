@@ -290,83 +290,77 @@ fn apply(app: &mut Application, action: Action) -> Result<Response> {
             username,
             confirmation,
             path,
-        } => {
-            match operation.as_str() {
-                "list" => {
-                    let databases = crate::database::admin::list(app, &runtime_id)?;
-                    let mut catalog: serde_json::Value = serde_json::from_str(
-                        &app.store
-                            .setting("database.catalog")?
-                            .unwrap_or_else(|| "{}".into()),
-                    )?;
-                    catalog[&runtime_id] = serde_json::to_value(databases)?;
-                    app.store
-                        .set_setting("database.catalog", &catalog.to_string())?;
-                }
-                "create" => crate::database::admin::create(
-                    app,
-                    &runtime_id,
-                    &database_name,
-                    username.as_deref(),
-                )?,
-                "delete" => crate::database::admin::delete(
-                    app,
-                    &runtime_id,
-                    &database_name,
-                    confirmation.as_deref().unwrap_or(""),
-                )?,
-                "backup" => {
-                    let b = crate::database::admin::backup(app, &runtime_id, &database_name)?;
-                    message = Some(format!(
-                        "Backup complete: {} (SHA-256 {})",
-                        b.path, b.sha256
-                    ));
-                }
-                "restore" => {
-                    let file = path.ok_or_else(|| Error::Message("Select a SQL file".into()))?;
-                    crate::database::admin::restore(
-                        app,
-                        &runtime_id,
-                        &database_name,
-                        Path::new(&file),
-                        confirmation.as_deref().unwrap_or(""),
-                    )?;
-                    message=Some("Restore completed. SQL was applied with the database-specific project user.".into());
-                }
-                "credential" => {
-                    let b = crate::database::admin::managed(&app.store)?
-                        .into_iter()
-                        .find(|b| b.runtime_id == runtime_id && b.database_name == database_name)
-                        .ok_or_else(|| Error::Message("Managed database not found".into()))?;
-                    credential = Some(
-                        crate::database::provision::secret(&app.home, &b.credential_ref)?
-                            .to_string(),
-                    );
-                }
-                "connection" => {
-                    let b = crate::database::admin::managed(&app.store)?
-                        .into_iter()
-                        .find(|b| b.runtime_id == runtime_id && b.database_name == database_name)
-                        .ok_or_else(|| Error::Message("Managed database not found".into()))?;
-                    let port: Option<u16> = app
-                        .store
-                        .conn
-                        .query_row(
-                            "SELECT port FROM port_allocations WHERE owner=?1",
-                            [&runtime_id],
-                            |r| r.get(0),
-                        )
-                        .ok();
-                    message = Some(format!(
-                        "Host: 127.0.0.1\nPort: {}\nDatabase: {}\nUser: {}\nPassword omitted. External clients open separately without credential arguments.",
-                        port.map_or("not allocated".into(), |p| p.to_string()),
-                        b.database_name,
-                        b.username
-                    ));
-                }
-                _ => return crate::core::fail("Unknown database administration action"),
+        } => match operation.as_str() {
+            "list" => {
+                let databases = crate::database::admin::list(app, &runtime_id)?;
+                let mut catalog: serde_json::Value = serde_json::from_str(
+                    &app.store
+                        .setting("database.catalog")?
+                        .unwrap_or_else(|| "{}".into()),
+                )?;
+                catalog[&runtime_id] = serde_json::to_value(databases)?;
+                app.store
+                    .set_setting("database.catalog", &catalog.to_string())?;
             }
-        }
+            "create" => crate::database::admin::create(
+                app,
+                &runtime_id,
+                &database_name,
+                username.as_deref(),
+            )?,
+            "delete" => crate::database::admin::delete(
+                app,
+                &runtime_id,
+                &database_name,
+                confirmation.as_deref().unwrap_or(""),
+            )?,
+            "backup" => {
+                let b = crate::database::admin::backup(app, &runtime_id, &database_name)?;
+                message = Some(format!(
+                    "Backup complete: {} (SHA-256 {})",
+                    b.path, b.sha256
+                ));
+            }
+            "restore" => {
+                let file = path.ok_or_else(|| Error::Message("Select a SQL file".into()))?;
+                crate::database::admin::restore(
+                    app,
+                    &runtime_id,
+                    &database_name,
+                    Path::new(&file),
+                    confirmation.as_deref().unwrap_or(""),
+                )?;
+                message = Some(
+                    "Restore completed. SQL was applied with the database-specific project user."
+                        .into(),
+                );
+            }
+            "credential" => {
+                let b = crate::database::admin::binding(&app.store, &runtime_id, &database_name)?;
+                credential = Some(
+                    crate::database::provision::secret(&app.home, &b.credential_ref)?.to_string(),
+                );
+            }
+            "connection" => {
+                let b = crate::database::admin::binding(&app.store, &runtime_id, &database_name)?;
+                let port: Option<u16> = app
+                    .store
+                    .conn
+                    .query_row(
+                        "SELECT port FROM port_allocations WHERE owner=?1",
+                        [&runtime_id],
+                        |r| r.get(0),
+                    )
+                    .ok();
+                message = Some(format!(
+                    "Host: 127.0.0.1\nPort: {}\nDatabase: {}\nUser: {}\nPassword omitted. External clients open separately without credential arguments.",
+                    port.map_or("not allocated".into(), |p| p.to_string()),
+                    b.database_name,
+                    b.username
+                ));
+            }
+            _ => return crate::core::fail("Unknown database administration action"),
+        },
 
         Action::SiteProcess {
             site_id,
@@ -943,7 +937,12 @@ pub(crate) fn ca_operation(
     let mut app = state.lock().unwrap_or_else(|e| e.into_inner());
     let recovery = crate::tls::resume_recreate(&app.store, &app.home)
         .and_then(|()| crate::tls::resume_safe_pending(&app.store, &app.home));
-    let resumed = app.resume_ca_routes();
+    // An unresolved CA state keeps routes blocked; only Recover may clear it.
+    let resumed = if recovery.is_ok() {
+        app.resume_ca_routes()
+    } else {
+        Ok(())
+    };
     let errors = [result.err(), recovery.err(), resumed.err()]
         .into_iter()
         .flatten()
@@ -968,6 +967,21 @@ pub fn tray_action_allowed(app: &Application) -> Result<()> {
     Ok(())
 }
 pub fn shutdown_shared(state: &Shared) -> Result<()> {
+    shutdown_waiting(state, true)
+}
+/// `RunEvent::Exit` runs on the UI thread. If tray Quit already waited, stop
+/// owned processes once without waiting again. Otherwise wait at most the
+/// normal bound: the CA journals recover an interrupted critical section.
+pub fn shutdown_on_exit(state: &Shared) -> Result<()> {
+    {
+        let mut app = state.lock().unwrap_or_else(|e| e.into_inner());
+        if app.shutting_down {
+            return app.shutdown();
+        }
+    }
+    shutdown_waiting(state, false)
+}
+fn shutdown_waiting(state: &Shared, wait_for_critical: bool) -> Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     {
         let mut app = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -982,8 +996,8 @@ pub fn shutdown_shared(state: &Shared) -> Result<()> {
     }
     loop {
         let mut app = state.lock().unwrap_or_else(|e| e.into_inner());
-        if !app.operation_busy || (!app.operation_critical && std::time::Instant::now() >= deadline)
-        {
+        let critical = wait_for_critical && app.operation_critical;
+        if !app.operation_busy || (!critical && std::time::Instant::now() >= deadline) {
             return app.shutdown();
         }
         // CA file moves must finish/rollback even beyond the normal quit bound.
@@ -1198,6 +1212,23 @@ mod locking_tests {
                     .any(|i| i.contains(name) && i.contains("failed"))
             );
         }
+    }
+    #[test]
+    fn unresolved_ca_recovery_keeps_routes_blocked() {
+        let (_root, shared) = application();
+        // A corrupt recreate journal makes post-operation recovery fail.
+        lock(&shared)
+            .unwrap()
+            .store
+            .set_setting("tls.ca_recreate", "{not json")
+            .unwrap();
+        let result = ca_operation(&shared, "upgrade", || {
+            Err(Error::Message("simulated upgrade failure".into()))
+        });
+        assert!(result.is_err());
+        let app = lock(&shared).unwrap();
+        assert!(app.ca_routes_blocked());
+        assert!(app.issues.iter().any(|i| i.starts_with("HTTPS CA upgrade")));
     }
     #[test]
     fn tray_actions_respect_busy_state_and_finish_dns_preserves_shutdown_issues() {
