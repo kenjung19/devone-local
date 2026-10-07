@@ -6,6 +6,7 @@ import { ImportDialog, PhpDialog } from "./RuntimeDialogs";
 import { DatabaseManager } from "./DatabaseManager";
 import { SiteDetail } from "./SiteDetail";
 import App from "../App";
+import { ProductSettings } from "./ProductSettings";
 import { bridge } from "../bridge";
 import type { Installation, Manifest, Site, Snapshot } from "../contracts";
 
@@ -167,6 +168,32 @@ describe("runtime dialogs", () => {
   });
 });
 describe("credential and polling state", () => {
+  it("shows blocked CA recovery only in that state and requires confirmation", async () => {
+    const execute = vi.fn(async () => true);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const blocked = {
+      ...data,
+      setup: { ...data.setup, caddy: true, ca_recovery_needed: true },
+    };
+    await act(async () =>
+      root.render(
+        <ProductSettings data={blocked} busy={false} act={execute} />,
+      ),
+    );
+    await click("Abandon upgrade and create new CA");
+    expect(execute).not.toHaveBeenCalled();
+    confirm.mockReturnValue(true);
+    await click("Abandon upgrade and create new CA");
+    expect(execute).toHaveBeenCalledWith({
+      type: "recover_ca",
+      confirmed: true,
+    });
+    await act(async () =>
+      root.render(<ProductSettings data={data} busy={false} act={execute} />),
+    );
+    expect(host.textContent).not.toContain("Abandon upgrade and create new CA");
+    confirm.mockRestore();
+  });
   it("reveals a DB password locally and erases it on Hide", async () => {
     const execute = vi.fn(async () => true);
     vi.mocked(bridge.execute).mockResolvedValue({

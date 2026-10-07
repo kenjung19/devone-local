@@ -63,6 +63,9 @@ pub struct Application {
     paused: BTreeSet<String>,
     ca_blocked: bool,
     pub(crate) operation_busy: bool,
+    pub(crate) operation_critical: bool,
+    pub(crate) operation_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) shutting_down: bool,
     last_routes: Option<std::time::Instant>,
 }
 impl Application {
@@ -91,9 +94,12 @@ impl Application {
         let store = Store::open(&home.path("devone.db"))?;
         // Interrupted upgrades with no replacement trust restore the legacy
         // served chain before any automatic service starts, without a prompt.
-        let ca_error = crate::tls::resume_safe_pending(&store, &home)
-            .and_then(|()| crate::tls::ensure_ca(&home))
-            .err();
+        let ca_error = crate::tls::resume_recreate(&store, &home)
+            .map_err(|e| format!("HTTPS CA recreation recovery failed: {e}. Use Settings → HTTPS to retry."))
+            .and_then(|()| crate::tls::resume_safe_pending(&store, &home)
+                .map_err(|e| format!("HTTPS CA upgrade could not be rolled back automatically: {e}. Use Settings → HTTPS to recover.")))
+            .and_then(|()| crate::tls::ensure_ca(&home)
+                .map_err(|e| format!("HTTPS CA initialization failed: {e}. Use Settings → HTTPS to retry."))).err();
         crate::tools::migrate_defaults(&store)?;
         crate::tools::tasks::load(&home)?;
         crate::phase3::templates::load(&home)?;
@@ -110,11 +116,14 @@ impl Application {
             paused: BTreeSet::new(),
             ca_blocked: ca_error.is_some(),
             operation_busy: false,
+            operation_critical: false,
+            operation_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            shutting_down: false,
             last_routes: None,
         };
         if let Some(error) = ca_error {
             tracing::error!(%error, "HTTPS CA startup recovery failed");
-            app.record_issue(format!("HTTPS CA upgrade could not be rolled back automatically: {error}. Use Settings → HTTPS to retry."));
+            app.record_issue(error);
         }
         if let Err(e) = catalog::refresh(&app.store, &app.home.path("config/runtime-catalog.json"))
         {
@@ -152,6 +161,9 @@ impl Application {
         Ok(())
     }
     pub(crate) fn finish_dns(&mut self) {
+        if self.shutting_down {
+            return;
+        }
         self.issues.retain(|i| {
             !i.starts_with("DNS UDP ")
                 && !i.starts_with("DNS TCP ")
@@ -295,17 +307,20 @@ impl Application {
         self.routed.clear();
         Ok(())
     }
+    #[cfg(all(test, feature = "desktop"))]
+    pub(crate) fn ca_routes_blocked(&self) -> bool {
+        self.ca_blocked
+    }
     pub(crate) fn resume_ca_routes(&mut self) -> Result<()> {
-        self.ca_blocked = false;
-        if self.active {
+        self.finish_ca_upgrade();
+        if self.active && !self.shutting_down {
             self.start_required()?;
         }
         Ok(())
     }
     pub(crate) fn finish_ca_upgrade(&mut self) {
         self.ca_blocked = false;
-        self.issues
-            .retain(|i| !i.starts_with("HTTPS CA upgrade could not be rolled back automatically:"));
+        self.issues.retain(|i| !i.starts_with("HTTPS CA "));
     }
     pub fn recreate_ca(&mut self, confirmed: bool) -> Result<()> {
         if !confirmed {
@@ -320,7 +335,7 @@ impl Application {
         self.routed.clear();
         let result = crate::tls::recreate(&self.store, &self.home, confirmed);
         if result.is_ok() {
-            self.ca_blocked = false;
+            self.finish_ca_upgrade();
         }
         if self.active
             && let Err(e) = self.start_required()
@@ -365,6 +380,18 @@ impl Application {
         result
     }
     pub fn snapshot(&mut self) -> Result<Snapshot> {
+        self.issues
+            .retain(|issue| !issue.starts_with("Port fallback: "));
+        let warnings = self
+            .store
+            .conn
+            .prepare("SELECT value FROM settings WHERE key LIKE 'ports.fallback.%'")?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for warning in warnings {
+            self.record_issue(warning);
+        }
+
         let services = self.supervisor.states(&self.store)?;
         if self
             .last_routes
@@ -508,6 +535,9 @@ impl Application {
         self.start_required()
     }
     fn start_required(&mut self) -> Result<()> {
+        if self.shutting_down {
+            return Ok(());
+        }
         let sites = self
             .sites()?
             .into_iter()
@@ -948,7 +978,7 @@ impl Application {
                 crate::projects::vite::cleanup(&self.home, site)?;
             }
         }
-        if !self.active || self.ca_blocked {
+        if !self.active || self.ca_blocked || self.shutting_down {
             return Ok(());
         }
         let mut routes = Vec::new();
@@ -1069,6 +1099,7 @@ impl Application {
         self.cleanup_after_stop(stopped)
     }
     pub fn shutdown(&mut self) -> Result<()> {
+        self.shutting_down = true;
         crate::phase3::templates::cancel_home(&self.home);
         crate::tools::tasks::cancel_home(&self.home);
         self.active = false;

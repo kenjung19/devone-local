@@ -148,6 +148,9 @@ pub enum Action {
     RecreateCa {
         confirmed: bool,
     },
+    RecoverCa {
+        confirmed: bool,
+    },
     Startup {
         enabled: bool,
     },
@@ -646,6 +649,9 @@ fn apply(app: &mut Application, action: Action) -> Result<Response> {
             );
         }
         Action::Startup { enabled } => crate::platform::startup::set(&app.home, enabled)?,
+        Action::RecoverCa { .. } => {
+            return crate::core::fail("CA recovery requires the shared operation boundary");
+        }
         Action::EnvironmentAutostart { enabled } => app
             .store
             .set_setting("autostart", if enabled { "true" } else { "false" })?,
@@ -709,7 +715,7 @@ fn lock(state: &Shared) -> Result<std::sync::MutexGuard<'_, Application>> {
 /// Shared application command boundary for Tauri and explicit acceptance clients.
 pub fn execute_shared(state: &Shared, action: Action) -> Result<Response> {
     let mut app = lock(state)?;
-    if app.operation_busy {
+    if app.operation_busy || app.shutting_down {
         return crate::core::fail(
             "Another environment operation is running; wait for it to finish",
         );
@@ -723,10 +729,14 @@ pub fn execute_shared(state: &Shared, action: Action) -> Result<Response> {
     {
         let (site, process) = app.prepare_process_start(site_id, process_id, operation)?;
         app.operation_busy = true;
+        crate::operation::set(Some(app.operation_cancel.clone()));
         drop(app);
         let _operation = Operation(state.clone());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let result = loop {
+            if let Err(error) = crate::operation::check() {
+                break Err(error);
+            }
             let mut app = lock(state)?;
             let Application {
                 supervisor, store, ..
@@ -766,6 +776,7 @@ pub fn execute_shared(state: &Shared, action: Action) -> Result<Response> {
             | Action::RemoveTrust
             | Action::UpgradeCa
             | Action::RecreateCa { .. }
+            | Action::RecoverCa { .. }
             | Action::RemoteCatalog { .. }
             | Action::RefreshCatalog
     ) {
@@ -773,13 +784,18 @@ pub fn execute_shared(state: &Shared, action: Action) -> Result<Response> {
         if matches!(action, Action::Dns | Action::RemoveDns) {
             app.prepare_dns(matches!(action, Action::RemoveDns))?;
         }
-        if matches!(action, Action::RecreateCa { confirmed: false }) {
+        if matches!(
+            action,
+            Action::RecreateCa { confirmed: false } | Action::RecoverCa { confirmed: false }
+        ) {
             return crate::core::fail("Confirm CA recreation first");
         }
-        if matches!(action, Action::RecreateCa { .. }) {
-            app.stop_ca_routes()?;
-        }
         app.operation_busy = true;
+        app.operation_critical = matches!(
+            action,
+            Action::UpgradeCa | Action::RecreateCa { .. } | Action::RecoverCa { .. }
+        );
+        crate::operation::set((!app.operation_critical).then(|| app.operation_cancel.clone()));
         drop(app);
         let _operation = Operation(state.clone());
         let store = crate::storage::Store::background(&home.path("devone.db"))?;
@@ -797,10 +813,10 @@ pub fn execute_shared(state: &Shared, action: Action) -> Result<Response> {
 struct Operation(Shared);
 impl Drop for Operation {
     fn drop(&mut self) {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .operation_busy = false;
+        let mut app = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        app.operation_busy = false;
+        app.operation_critical = false;
+        crate::operation::set(None);
     }
 }
 fn run_unlocked(
@@ -809,6 +825,12 @@ fn run_unlocked(
     home: &crate::config::Home,
     action: Action,
 ) -> Result<Option<String>> {
+    crate::operation::check()?;
+    if lock(state)?.shutting_down {
+        return Err(Error::Cancelled(
+            "Operation cancelled before starting because DEVONE is quitting".into(),
+        ));
+    }
     let mut message = None;
     match action {
         Action::Install { runtime } => {
@@ -847,25 +869,33 @@ fn run_unlocked(
         }
         Action::RemoveTrust => crate::tls::remove_trust(store, home)?,
         Action::UpgradeCa => {
-            crate::tls::upgrade(store, home, |mode| match mode {
-                crate::tls::Reload::Stop => lock(state)?.stop_ca_routes(),
-                crate::tls::Reload::Start => {
-                    crate::setup::prepare_ca(store, home)?;
-                    lock(state)?.resume_ca_routes()
-                }
+            ca_operation(state, "upgrade", || {
+                crate::tls::upgrade(store, home, |mode| match mode {
+                    crate::tls::Reload::Stop => lock(state)?.stop_ca_routes(),
+                    crate::tls::Reload::Start => {
+                        crate::setup::prepare_ca(store, home)?;
+                        lock(state)?.resume_ca_routes()
+                    }
+                })
             })?;
-            lock(state)?.finish_ca_upgrade();
             message = Some(
                 "HTTPS CA upgraded to .test-only trust; legacy CA is preserved in backups.".into(),
             );
         }
         Action::RecreateCa { confirmed } => {
-            crate::tls::recreate(store, home, confirmed)?;
-            lock(state)?.resume_ca_routes()?;
+            ca_operation(state, "recreation", || {
+                crate::tls::recreate(store, home, confirmed)
+            })?;
             message = Some(
                 "New CA created. Install its trust again; old CA data is preserved in backups."
                     .into(),
             );
+        }
+        Action::RecoverCa { confirmed } => {
+            ca_operation(state, "recovery", || {
+                crate::tls::recover_ca(store, home, confirmed)
+            })?;
+            message = Some("Blocked CA upgrade abandoned. A new .test-only CA was created; install its trust again. Previous CA files remain in backups.".into());
         }
         Action::RemoteCatalog { url, sha256 } => {
             crate::catalog::refresh_source(
@@ -898,8 +928,68 @@ fn run_unlocked(
     }
     Ok(message)
 }
+pub(crate) fn ca_operation(
+    state: &Shared,
+    name: &str,
+    run: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        lock(state)?.stop_ca_routes()?;
+        run()
+    }))
+    .unwrap_or_else(|_| crate::core::fail(format!("CA {name} panicked")));
+    // A panic may leave an upgrade switched; rollback before resuming whichever
+    // CA is active. File recovery does not issue another trust prompt.
+    let mut app = state.lock().unwrap_or_else(|e| e.into_inner());
+    let recovery = crate::tls::resume_recreate(&app.store, &app.home)
+        .and_then(|()| crate::tls::resume_safe_pending(&app.store, &app.home));
+    let resumed = app.resume_ca_routes();
+    let errors = [result.err(), recovery.err(), resumed.err()]
+        .into_iter()
+        .flatten()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        return Ok(());
+    }
+    let error = format!(
+        "HTTPS CA {name} failed: {}. Use Settings → HTTPS to retry or recover.",
+        errors.join("; ")
+    );
+    app.record_issue(error.clone());
+    crate::core::fail(error)
+}
+pub fn tray_action_allowed(app: &Application) -> Result<()> {
+    if app.operation_busy || app.shutting_down {
+        return crate::core::fail(
+            "Tray action blocked while an environment operation is running or DEVONE is quitting",
+        );
+    }
+    Ok(())
+}
 pub fn shutdown_shared(state: &Shared) -> Result<()> {
-    state.lock().unwrap_or_else(|e| e.into_inner()).shutdown()
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    {
+        let mut app = state.lock().unwrap_or_else(|e| e.into_inner());
+        app.shutting_down = true;
+        app.operation_cancel
+            .store(true, std::sync::atomic::Ordering::Release);
+        if app.operation_busy {
+            app.record_issue(
+                "Quit is waiting for the current environment operation to finish safely".into(),
+            );
+        }
+    }
+    loop {
+        let mut app = state.lock().unwrap_or_else(|e| e.into_inner());
+        if !app.operation_busy || (!app.operation_critical && std::time::Instant::now() >= deadline)
+        {
+            return app.shutdown();
+        }
+        // CA file moves must finish/rollback even beyond the normal quit bound.
+        drop(app);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 pub fn validate_sql_selection(value: Option<String>) -> Result<Option<String>> {
     if let Some(path) = &value {
@@ -1086,6 +1176,77 @@ mod locking_tests {
         .unwrap();
         (root, Arc::new(Mutex::new(app)))
     }
+    #[test]
+    fn failed_recreate_upgrade_and_panic_resume_routes_and_record_issues() {
+        for name in ["recreation", "upgrade", "panic"] {
+            let (_root, shared) = application();
+            let result = ca_operation(&shared, name, || {
+                assert!(lock(&shared).unwrap().ca_routes_blocked());
+                if name == "panic" {
+                    panic!("simulated CA panic");
+                }
+                Err(Error::Cancelled(
+                    "simulated trust cancel or archive failure before Reload::Start".into(),
+                ))
+            });
+            assert!(result.is_err());
+            let app = lock(&shared).unwrap();
+            assert!(!app.ca_routes_blocked());
+            assert!(
+                app.issues
+                    .iter()
+                    .any(|i| i.contains(name) && i.contains("failed"))
+            );
+        }
+    }
+    #[test]
+    fn tray_actions_respect_busy_state_and_finish_dns_preserves_shutdown_issues() {
+        let (_root, shared) = application();
+        let mut app = lock(&shared).unwrap();
+        app.operation_busy = true;
+        assert!(tray_action_allowed(&app).is_err());
+        app.shutting_down = true;
+        app.record_issue("DNS UDP 53 conflict".into());
+        app.finish_dns();
+        assert!(app.issues.iter().any(|i| i.starts_with("DNS UDP")));
+    }
+    #[test]
+    fn quit_waits_for_ca_critical_section_before_shutdown() {
+        let (_root, shared) = application();
+        {
+            let mut app = lock(&shared).unwrap();
+            app.operation_busy = true;
+            app.operation_critical = true;
+            app.active = true;
+        }
+        let worker = shared.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            done_tx.send(shutdown_shared(&worker)).unwrap();
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !lock(&shared).unwrap().shutting_down {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err()
+        );
+        assert!(lock(&shared).unwrap().active);
+        {
+            let mut app = lock(&shared).unwrap();
+            app.operation_busy = false;
+            app.operation_critical = false;
+        }
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        thread.join().unwrap();
+        assert!(!lock(&shared).unwrap().active);
+    }
     #[cfg(windows)]
     #[test]
     fn database_password_uses_credential_field_and_never_message_or_snapshot() {
@@ -1152,18 +1313,19 @@ mod locking_tests {
         let (_root, shared) = application();
         let worker = shared.clone();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
         let thread = std::thread::spawn(move || {
             lock(&worker).unwrap().operation_busy = true;
+            let cancel = lock(&worker).unwrap().operation_cancel.clone();
             let _operation = Operation(worker);
             ready_tx.send(()).unwrap();
-            done_rx.recv().unwrap();
+            while !cancel.load(std::sync::atomic::Ordering::Acquire) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
         });
         ready_rx.recv().unwrap();
         assert!(shared.try_lock().unwrap().snapshot().is_ok());
         assert!(execute_shared(&shared, Action::Scan).is_err());
         shutdown_shared(&shared).unwrap();
-        done_tx.send(()).unwrap();
         thread.join().unwrap();
         assert!(!lock(&shared).unwrap().operation_busy);
         assert!(

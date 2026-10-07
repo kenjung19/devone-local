@@ -81,6 +81,7 @@ export interface Snapshot {
     ca_present: boolean;
     ca_trusted: boolean;
     ca_upgrade_pending?: boolean;
+    ca_recovery_needed?: boolean;
     caddy: boolean;
     php: boolean;
     mysql: boolean;
@@ -185,6 +186,7 @@ export type Action =
   | { type: "install_tool"; id: string; version: string; node: string | null }
   | { type: "startup" | "environment_autostart"; enabled: boolean }
   | { type: "recreate_ca"; confirmed: boolean }
+  | { type: "recover_ca"; confirmed: boolean }
   | { type: "finish_setup"; skip: boolean }
   | { type: "remote_catalog"; url: string; sha256: string }
   | {

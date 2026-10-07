@@ -157,6 +157,7 @@ pub fn override_site(
 fn copy_tree(source: &Path, target: &Path) -> Result<()> {
     std::fs::create_dir_all(target)?;
     for item in std::fs::read_dir(source)? {
+        crate::operation::check()?;
         let item = item?;
         let path = item.path();
         if crate::platform::is_link(&path)? {
@@ -441,6 +442,7 @@ fn install_inner(store: &Store, home: &Home, reference: &RuntimeRef) -> Result<I
     let mut data = Vec::new();
     let mut buffer = [0; 64 * 1024];
     loop {
+        crate::operation::check()?;
         let n = response.read(&mut buffer)?;
         if n == 0 {
             break;

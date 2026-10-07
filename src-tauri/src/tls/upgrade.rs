@@ -40,6 +40,18 @@ fn load(store: &Store) -> Result<Option<Upgrade>> {
 fn save(store: &Store, state: &Upgrade) -> Result<()> {
     store.set_setting("tls.ca_upgrade", &serde_json::to_string(state)?)
 }
+pub fn recovery_needed(store: &Store, home: &Home) -> Result<bool> {
+    Ok(load(store)?.is_some_and(|state| {
+        state.phase == Phase::Switched
+            && !crate::platform::ca_trusted(&authority::root_path(home))
+            && verify_legacy(store, home, &state).is_err()
+    }))
+}
+pub(super) fn archived_root(store: &Store, home: &Home) -> Result<Option<PathBuf>> {
+    load(store)?
+        .map(|state| backup(home, &state).map(|p| p.join("root.crt")))
+        .transpose()
+}
 fn backup(home: &Home, state: &Upgrade) -> Result<PathBuf> {
     // The persisted value is an identifier, never an arbitrary move destination.
     uuid::Uuid::parse_str(&state.backup)

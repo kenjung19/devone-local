@@ -232,6 +232,7 @@ pub fn delete(app: &mut Application, id: &str, name: &str, confirmation: &str) -
         return fail("Type the exact database name to confirm destructive deletion");
     }
     let b = binding(&app.store, id, name)?;
+    let name = b.database_name.as_str();
     if !super::provision::valid_name(&b.username) {
         return fail("Invalid recorded user; no destructive operation performed");
     }
@@ -320,7 +321,7 @@ fn execute(
     args.extend(extra);
     let owner = crate::platform::Ownership::new()?;
     let mut cmd = Command::new(mysql_tool(item, home, tool)?);
-    crate::platform::configure(&mut cmd);
+    crate::platform::configure_owned(&mut cmd);
     // Password is never in arguments/logs; a process-local environment is used by managed MySQL clients.
     let mut child = cmd
         .args(args)
@@ -386,6 +387,7 @@ fn backup_folder(home: &Home, name: &str) -> Result<std::path::PathBuf> {
 }
 pub fn backup(app: &mut Application, id: &str, name: &str) -> Result<Backup> {
     let b = binding(&app.store, id, name)?;
+    let name = b.database_name.as_str();
     let port = port(app, id)?;
     let item = crate::runtime::installed(&app.store)?
         .into_iter()
@@ -485,6 +487,7 @@ pub fn restore(
         );
     }
     let b = binding(&app.store, id, name)?;
+    let name = b.database_name.as_str();
     validate_restore_source(path)?;
     if let Some(s) = &b.site_id
         && app.site(s)?.status == "running"

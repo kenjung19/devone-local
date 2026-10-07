@@ -190,7 +190,17 @@ pub fn elevate(remove: bool) -> Result<()> {
                 "DNS helper returned no process handle; inspect Local Domains state and retry",
             );
         }
-        let waited = WaitForSingleObject(info.hProcess, 120_000);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let waited = loop {
+            let status = WaitForSingleObject(info.hProcess, 100);
+            if status != 258 || std::time::Instant::now() >= deadline {
+                break status;
+            }
+            if crate::operation::cancelled() {
+                CloseHandle(info.hProcess);
+                return Err(crate::core::Error::Cancelled("DNS helper wait cancelled while quitting; verify the exact owned policy on next launch".into()));
+            }
+        };
         let mut code = 1;
         let ok = GetExitCodeProcess(info.hProcess, &mut code);
         CloseHandle(info.hProcess);

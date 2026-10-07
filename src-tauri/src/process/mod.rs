@@ -84,7 +84,7 @@ impl Supervisor {
             .open(&spec.log)?;
         let ownership = platform::Ownership::new()?;
         let mut cmd = Command::new(&spec.binary);
-        platform::configure(&mut cmd);
+        platform::configure_owned(&mut cmd);
         let mut child = cmd
             .args(&spec.args)
             .current_dir(&spec.cwd)
@@ -438,7 +438,7 @@ pub fn run_bounded(
     let result = (|| {
         let ownership = platform::Ownership::new()?;
         let mut cmd = Command::new(binary);
-        platform::configure(&mut cmd);
+        platform::configure_owned(&mut cmd);
         let mut child = cmd
             .args(args)
             .current_dir(cwd)
@@ -461,6 +461,13 @@ pub fn run_bounded(
                     code: status.code(),
                     output,
                 });
+            }
+            if crate::operation::cancelled() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(crate::core::Error::Cancelled(
+                    "Process operation cancelled while quitting".into(),
+                ));
             }
             if Instant::now() >= deadline {
                 let _ = child.kill();
@@ -492,7 +499,7 @@ pub fn run_logged(
     writeln!(file, "[DEVONE] Starting explicit install action")?;
     let ownership = platform::Ownership::new()?;
     let mut cmd = Command::new(binary);
-    platform::configure(&mut cmd);
+    platform::configure_owned(&mut cmd);
     let mut child = cmd
         .args(args)
         .current_dir(cwd)
@@ -515,6 +522,13 @@ pub fn run_logged(
             } else {
                 fail(format!("Install failed ({status}); see {}", log.display()))
             };
+        }
+        if crate::operation::cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(crate::core::Error::Cancelled(
+                "Process operation cancelled while quitting".into(),
+            ));
         }
         if Instant::now() >= deadline {
             let _ = child.kill();

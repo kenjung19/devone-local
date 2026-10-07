@@ -43,6 +43,9 @@ impl Store {
             ))?;
         }
         // No stale PID is adopted or killed: Windows Job Objects clean up owned children.
+        // Retain a diagnostic hint for a port conflict, verified against the
+        // executable and listener before reporting it. Never adopt/kill this PID.
+        conn.execute("INSERT INTO settings(key,value) SELECT 'process.last_pid.' || service_key, CAST(pid AS TEXT) FROM process_state WHERE pid IS NOT NULL ON CONFLICT(key) DO UPDATE SET value=excluded.value", [])?;
         conn.execute("UPDATE process_state SET pid=NULL,status='stopped'", [])?;
         Ok(Self { conn })
     }

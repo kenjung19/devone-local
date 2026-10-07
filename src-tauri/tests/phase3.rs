@@ -461,8 +461,10 @@ fn native_database_backup_restore_and_delete_preserve_unrelated_data() {
         .unwrap();
     connection.query_drop("CREATE EVENT acceptance_event ON SCHEDULE EVERY 1 DAY STARTS CURRENT_TIMESTAMP + INTERVAL 1 DAY DO SET @devone_event=1").unwrap();
     connection.query_drop("CREATE TRIGGER acceptance_trigger BEFORE INSERT ON acceptance FOR EACH ROW SET NEW.value=CONCAT(NEW.value,' trigger')").unwrap();
-    let backup = devone::database::admin::backup(&mut a, &item.id, "backup_test").unwrap();
+    let backup = devone::database::admin::backup(&mut a, &item.id, "BACKUP_TEST").unwrap();
     assert!(backup.size > 0);
+    assert_eq!(backup.database, "backup_test");
+    assert_eq!(backup.database, "backup_test");
     assert!(Path::new(&backup.path).starts_with(a.home.path("backups/mysql/backup_test")));
     assert_eq!(
         devone::catalog::digest(&std::fs::read(&backup.path).unwrap()),
@@ -480,9 +482,9 @@ fn native_database_backup_restore_and_delete_preserve_unrelated_data() {
     devone::database::admin::restore(
         &mut a,
         &item.id,
-        "backup_test",
+        "BACKUP_TEST",
         Path::new(&backup.path),
-        "backup_test",
+        "BACKUP_TEST",
     )
     .unwrap();
     let value: Option<String> = connection
@@ -520,7 +522,7 @@ fn native_database_backup_restore_and_delete_preserve_unrelated_data() {
     let log = std::fs::read_to_string(a.home.path("logs/database-backup.log")).unwrap();
     assert!(!log.contains(secret.as_str()));
     drop(connection);
-    devone::database::admin::delete(&mut a, &item.id, "backup_test", "backup_test").unwrap();
+    devone::database::admin::delete(&mut a, &item.id, "BACKUP_TEST", "BACKUP_TEST").unwrap();
     assert!(Path::new(&backup.path).is_file());
     assert!(
         !devone::database::admin::list(&mut a, &item.id)

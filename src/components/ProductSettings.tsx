@@ -115,6 +115,29 @@ export function ProductSettings({
           <h2>HTTPS</h2>
         </div>
         <CaUpgradeNotice data={data} busy={busy} act={act} />
+        {data.setup.ca_recovery_needed && (
+          <div className="alert">
+            <p>
+              The interrupted CA upgrade cannot restore its legacy backup.
+              Recover by creating a new .test-only CA; previous files are
+              preserved and only recorded trust can be removed.
+            </p>
+            <button
+              disabled={busy || !data.setup.caddy}
+              onClick={() => {
+                if (
+                  window.confirm(
+                    "Abandon the blocked CA upgrade and create a new CA? Previous CA files will be archived. Install trust for the new CA afterwards.",
+                  )
+                )
+                  void act({ type: "recover_ca", confirmed: true });
+              }}
+            >
+              Abandon upgrade and create new CA
+            </button>
+          </div>
+        )}
+
         <dl>
           <dt>CA</dt>
           <dd>{data.setup.ca_present ? "Created" : "Not created"}</dd>
@@ -148,7 +171,9 @@ export function ProductSettings({
             Remove trust
           </button>
           <button
-            disabled={busy || !data.setup.caddy || data.setup.ca_upgrade_pending}
+            disabled={
+              busy || !data.setup.caddy || data.setup.ca_upgrade_pending
+            }
             onClick={() => setConfirmCa(true)}
           >
             Recreate CA…

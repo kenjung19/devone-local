@@ -1,4 +1,35 @@
 use super::*;
+#[test]
+fn startup_ensure_failure_reports_initialization_instead_of_upgrade_rollback() {
+    let d = tempfile::tempdir().unwrap();
+    let home = Home::new(d.path());
+    home.ensure().unwrap();
+    crate::tls::authority::ensure(&home).unwrap();
+    std::fs::write(
+        crate::tls::authority::key_path(&home),
+        "invalid preserved key",
+    )
+    .unwrap();
+    let app = Application::open_with_options(
+        home,
+        Options {
+            system_setup: false,
+            autostart: false,
+        },
+    )
+    .unwrap();
+    assert!(app.ca_blocked);
+    assert!(
+        app.issues
+            .iter()
+            .any(|i| i.starts_with("HTTPS CA initialization failed:"))
+    );
+    assert!(
+        !app.issues
+            .iter()
+            .any(|i| i.contains("could not be rolled back"))
+    );
+}
 
 #[test]
 fn completed_health_wait_cannot_authorize_a_process_stopped_by_shutdown() {

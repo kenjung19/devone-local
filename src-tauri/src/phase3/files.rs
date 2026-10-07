@@ -34,6 +34,7 @@ pub fn download(url: &str, hash: &str, flag: &AtomicBool) -> Result<Vec<u8>> {
     let mut chunk = [0; 65536];
     loop {
         cancelled(flag)?;
+        crate::operation::check()?;
         let n = response.read(&mut chunk)?;
         if n == 0 {
             break;

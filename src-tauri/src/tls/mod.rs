@@ -4,7 +4,10 @@ use crate::{
     storage::Store,
 };
 pub mod authority;
+mod recreate;
 mod upgrade;
+pub use recreate::{recover_ca, resume_recreate};
+pub use upgrade::recovery_needed;
 pub use upgrade::{Reload, resume_safe_pending, upgrade, upgrade_pending};
 pub fn legacy_path(home: &Home) -> std::path::PathBuf {
     home.path("certs/caddy/pki/authorities/local/root.crt")
@@ -79,58 +82,9 @@ fn remove_with(store: &Store, home: &Home, system: &impl TrustStore) -> Result<(
     Ok(())
 }
 pub fn recreate(store: &Store, home: &Home, confirmed: bool) -> Result<()> {
-    if !confirmed {
-        return fail(
-            "Confirm CA recreation: existing generated HTTPS certificates must be regenerated",
-        );
-    }
-    if upgrade_pending(store, home)? {
-        return fail("Upgrade the legacy HTTPS certificate authority before recreating it");
-    }
-    let storage = home.path("certs/caddy");
-    let authority = home.path("certs/devone-ca");
-    authority::safe_path(home, &storage)?;
-    authority::safe_path(home, &authority)?;
-    let previously_trusted = crate::platform::ca_trusted(&CaddyTls.ca_path(home));
-    remove_trust(store, home)?;
-    let backup = home
-        .path("backups")
-        .join(format!("caddy-ca-{}", uuid::Uuid::new_v4()));
-    authority::safe_path(home, &backup)?;
-    std::fs::create_dir(&backup)?;
-    crate::platform::harden_ca_path(&backup)?;
-    let moved_authority = authority.exists();
-    if moved_authority {
-        std::fs::rename(&authority, backup.join("devone-ca"))?;
-    }
-    let moved = storage.exists();
-    if moved {
-        std::fs::rename(&storage, backup.join("caddy"))?;
-    }
-    if let Err(error) = crate::setup::prepare_ca(store, home) {
-        // Preserve partial output as well as the old CA, without deleting data.
-        if storage.exists() {
-            std::fs::rename(
-                &storage,
-                home.path("backups")
-                    .join(format!("failed-ca-{}", uuid::Uuid::new_v4())),
-            )?;
-        }
-        if moved {
-            std::fs::rename(backup.join("caddy"), &storage)?;
-        }
-        if authority.exists() {
-            std::fs::rename(&authority, backup.join("failed-devone-ca"))?;
-        }
-        if moved_authority {
-            std::fs::rename(backup.join("devone-ca"), &authority)?;
-        }
-        if previously_trusted {
-            CaddyTls.trust(store, home)?;
-        }
-        return Err(error);
-    }
-    Ok(())
+    recreate::recreate_with(store, home, confirmed, false, &WindowsTrust, || {
+        crate::setup::prepare_ca(store, home)
+    })
 }
 impl TlsProvider for CaddyTls {
     fn ca_path(&self, home: &Home) -> std::path::PathBuf {

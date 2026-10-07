@@ -19,7 +19,11 @@ pub struct TrayView {
 }
 pub fn view(core: &mut Application) -> crate::core::Result<TrayView> {
     let services = core.supervisor.states(&core.store)?;
-    let status = if core.active {
+    let status = if core.shutting_down && core.operation_busy {
+        "Quitting · waiting for current operation"
+    } else if core.operation_busy {
+        "Environment operation in progress"
+    } else if core.active {
         if services.iter().any(|s| !s.healthy && s.status != "stopped") {
             "Environment needs attention"
         } else {
@@ -194,6 +198,13 @@ pub fn dispatch_menu(
     quitting: &Arc<AtomicBool>,
     id: &str,
 ) {
+    if id != "quit" {
+        let core = shared.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(error) = crate::ipc::tray_action_allowed(&core) {
+            tracing::warn!(%error, action=%id, "tray action blocked");
+            return;
+        }
+    }
     if id == "open" {
         restore(app);
         return;
@@ -217,6 +228,7 @@ pub fn dispatch_menu(
             let mut core = shared
                 .lock()
                 .map_err(|_| crate::core::Error::Message("Core lock poisoned".into()))?;
+            crate::ipc::tray_action_allowed(&core)?;
             match action.as_str() {
                 "start" => core.start_all(),
                 "stop" => core.stop_all(),

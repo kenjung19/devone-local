@@ -99,7 +99,7 @@ fn run(spec: Spec, cancel: &AtomicBool) -> Result<()> {
     writeln!(log, "[DEVONE] Dependency task running: {:?}", spec.args)?;
     let owner = platform::Ownership::new()?;
     let mut command = Command::new(&spec.binary);
-    platform::configure(&mut command);
+    platform::configure_owned(&mut command);
     let mut child = command
         .args(&spec.args)
         .current_dir(&spec.cwd)

@@ -121,15 +121,72 @@ pub fn sync_hosts(hosts: &[String]) -> Result<()> {
     if !backup.exists() {
         fs::copy(&path, &backup)?;
     }
-    crate::runtime::atomic_write(&path, output.as_bytes()).map_err(|e| {
-        crate::core::Error::Message(format!(
-            "Local DNS setup requires an elevated DEVONE session: {e}"
-        ))
+    replace_preserving_metadata(&path, output.as_bytes()).map_err(|e| {
+        crate::core::Error::Message(format!("Windows could not replace the hosts file: {e}"))
     })?;
     let mut flush = Command::new(system_executable("ipconfig.exe")?);
     configure(&mut flush);
     let _ = flush.arg("/flushdns").status();
     Ok(())
+}
+fn replace_preserving_metadata(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileAttributesW, INVALID_FILE_ATTRIBUTES, ReplaceFileW, SetFileAttributesW,
+    };
+    let temporary = path.with_file_name(format!(".devone-hosts-{}.tmp", uuid::Uuid::new_v4()));
+    let wide = |p: &Path| {
+        p.as_os_str()
+            .to_string_lossy()
+            .encode_utf16()
+            .chain(Some(0))
+            .collect::<Vec<_>>()
+    };
+    let target = wide(path);
+    let replacement = wide(&temporary);
+    let attributes = unsafe { GetFileAttributesW(target.as_ptr()) };
+    if attributes == INVALID_FILE_ATTRIBUTES {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let result = (|| -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        for attempt in 0..10 {
+            // ReplaceFile merges the original DACL/owner/streams. Do not ignore
+            // merge errors: preserving the security metadata is required.
+            if unsafe {
+                ReplaceFileW(
+                    target.as_ptr(),
+                    replacement.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            } != 0
+            {
+                if unsafe { SetFileAttributesW(target.as_ptr(), attributes) } == 0 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if attempt == 9 || !matches!(error.raw_os_error(), Some(5 | 32 | 33)) {
+                return Err(error.into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        unreachable!()
+    })();
+    if temporary.exists() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
 }
 pub fn trust_ca(path: &Path) -> Result<()> {
     // Windows may ask the user to approve a new root. Never leave a backend
@@ -251,8 +308,77 @@ impl Ownership {
         }
     }
     pub fn attach(&self, child: &Child) -> Result<()> {
-        if unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle() as HANDLE) } == 0 {
+        self.attach_with(child, resume_primary)
+    }
+    fn attach_with(&self, child: &Child, resume: impl FnOnce(u32) -> Result<()>) -> Result<()> {
+        let result = (|| {
+            if unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle() as HANDLE) } == 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            resume(child.id())
+        })();
+        if result.is_err() {
+            unsafe {
+                windows_sys::Win32::System::Threading::TerminateProcess(
+                    child.as_raw_handle() as HANDLE,
+                    1,
+                );
+                windows_sys::Win32::System::Threading::WaitForSingleObject(
+                    child.as_raw_handle() as HANDLE,
+                    5000,
+                );
+            }
+        }
+        result
+    }
+}
+fn resume_primary(pid: u32) -> Result<()> {
+    use windows_sys::Win32::{
+        Foundation::INVALID_HANDLE_VALUE,
+        System::{
+            Diagnostics::ToolHelp::*,
+            Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
+        },
+    };
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
             return Err(std::io::Error::last_os_error().into());
+        }
+        let mut entry: THREADENTRY32 = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of_val(&entry) as u32;
+        let mut found = None;
+        let mut multiple = false;
+        let mut next = Thread32First(snapshot, &mut entry);
+        while next != 0 {
+            if entry.th32OwnerProcessID == pid {
+                if found.is_some() {
+                    multiple = true;
+                }
+                found = Some(entry.th32ThreadID);
+            }
+            entry.dwSize = std::mem::size_of_val(&entry) as u32;
+            next = Thread32Next(snapshot, &mut entry);
+        }
+        CloseHandle(snapshot);
+        if multiple {
+            return fail("Suspended child has more than one thread; refusing ambiguous resume");
+        }
+        let id = found.ok_or_else(|| {
+            crate::core::Error::Message("Suspended child primary thread was not found".into())
+        })?;
+        let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, id);
+        if thread.is_null() {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let count = ResumeThread(thread);
+        let error = std::io::Error::last_os_error();
+        CloseHandle(thread);
+        if count == u32::MAX {
+            return Err(error.into());
+        }
+        if count != 1 {
+            return fail(format!("Unexpected primary thread suspend count {count}"));
         }
         Ok(())
     }
@@ -534,6 +660,31 @@ pub fn system_executable(name: &str) -> Result<PathBuf> {
 pub fn owns_tcp_listener(pid: u32, port: u16) -> bool {
     listener_owned_by(port, |owner| owner == pid)
 }
+pub fn recorded_listener(pid: u32, port: u16, exe: &Path) -> bool {
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    };
+    if !owns_tcp_listener(pid, port) {
+        return false;
+    }
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return false;
+        }
+        let mut buffer = vec![0u16; 32768];
+        let mut size = buffer.len() as u32;
+        let ok = QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut size);
+        CloseHandle(process);
+        ok != 0
+            && fs::canonicalize(PathBuf::from(String::from_utf16_lossy(
+                &buffer[..size as usize],
+            )))
+            .ok()
+            .zip(fs::canonicalize(exe).ok())
+            .is_some_and(|(a, b)| a == b)
+    }
+}
 fn listener_owned_by(port: u16, owns: impl Fn(u32) -> bool) -> bool {
     use windows_sys::Win32::NetworkManagement::IpHelper::*;
     unsafe {
@@ -613,6 +764,70 @@ pub fn choose_sql_file() -> Result<Option<PathBuf>> {
 
 #[cfg(test)]
 mod secret_tests {
+    #[test]
+    fn suspended_child_is_assigned_before_execution_and_failures_are_terminated() {
+        use super::*;
+        use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+        let d = tempfile::tempdir().unwrap();
+        let marker = d.path().join("ran.txt");
+        let mut cmd = Command::new(system_executable("cmd.exe").unwrap());
+        crate::platform::configure_owned(&mut cmd);
+        cmd.args(["/D", "/C", "echo ran>ran.txt"])
+            .current_dir(d.path());
+        let mut child = cmd.spawn().unwrap();
+        assert!(!marker.exists());
+        let job = Ownership::new().unwrap();
+        job.attach_with(&child, |pid| {
+            let mut member = 0;
+            assert_ne!(
+                unsafe { IsProcessInJob(child.as_raw_handle() as HANDLE, job.0, &mut member) },
+                0
+            );
+            assert_ne!(member, 0);
+            assert!(!marker.exists());
+            resume_primary(pid)
+        })
+        .unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(marker.exists());
+        fs::remove_file(&marker).unwrap();
+        let mut child = cmd.spawn().unwrap();
+        assert!(
+            job.attach_with(&child, |_| fail("simulated thread lookup/resume failure"))
+                .is_err()
+        );
+        assert!(child.try_wait().unwrap().is_some());
+        assert!(!marker.exists());
+        let mut child = cmd.spawn().unwrap();
+        let invalid = Ownership(std::ptr::null_mut());
+        assert!(invalid.attach(&child).is_err());
+        assert!(child.try_wait().unwrap().is_some());
+        assert!(!marker.exists());
+    }
+    #[test]
+    fn hosts_replacement_preserves_attributes_and_original_on_write_failure() {
+        use super::*;
+        use windows_sys::Win32::Storage::FileSystem::*;
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("hosts");
+        fs::write(&path, "original").unwrap();
+        let wide: Vec<u16> = path
+            .to_string_lossy()
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        unsafe {
+            assert_ne!(SetFileAttributesW(wide.as_ptr(), FILE_ATTRIBUTE_HIDDEN), 0);
+        }
+        replace_preserving_metadata(&path, b"replaced").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"replaced");
+        assert_ne!(
+            unsafe { GetFileAttributesW(wide.as_ptr()) } & FILE_ATTRIBUTE_HIDDEN,
+            0
+        );
+        assert!(replace_preserving_metadata(&d.path().join("missing"), b"no").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"replaced");
+    }
     #[test]
     fn actual_cryptoapi_memory_store_rejects_same_subject_and_same_issuer_serial_with_other_der() {
         use super::*;

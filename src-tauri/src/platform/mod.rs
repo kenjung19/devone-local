@@ -49,6 +49,25 @@ pub fn is_link(path: &Path) -> Result<bool> {
 pub fn configure(command: &mut Command) {
     native::configure(command);
 }
+pub fn configure_owned(command: &mut Command) {
+    configure(command);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000 | 0x00000004);
+    }
+}
+pub fn recorded_listener(pid: u32, port: u16, exe: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        native::recorded_listener(pid, port, exe)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (pid, port, exe);
+        false
+    }
+}
 pub fn open(target: &str) -> Result<()> {
     native::open(target)
 }

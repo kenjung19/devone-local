@@ -637,7 +637,7 @@ fn run(
     writeln!(out, "[DEVONE] Execute managed {exe} {:?}", args)?;
     let owner = crate::platform::Ownership::new()?;
     let mut command = Command::new(runtime.binary(home, "cli")?);
-    crate::platform::configure(&mut command);
+    crate::platform::configure_owned(&mut command);
     let mut child = command
         .args(&args)
         .envs(env)
@@ -881,18 +881,7 @@ fn create(
         let destination = validate_name(&store, home, &r.name)?;
         // Register a disabled site before making the completed folder visible to the watcher.
         // Discovery can then safely race finalization without executing the new project.
-        let site_id: String = {
-            use rusqlite::OptionalExtension;
-            store
-                .conn
-                .query_row(
-                    "SELECT id FROM sites WHERE project_path=?1",
-                    [destination.to_string_lossy().as_ref()],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
-        };
+        let site_id = uuid::Uuid::new_v4().to_string();
         let (kind, document_root) = crate::projects::detect(&project);
         let relative_root = document_root.strip_prefix(&project).map_err(|_| {
             crate::core::Error::Message("Template document root escaped project".into())
@@ -907,6 +896,7 @@ fn create(
         let mut preferences = crate::phase3::preferences::list(&store)?;
         preferences.entry(site_id.clone()).or_default().created_at = timestamp();
         let tx = store.conn.transaction()?;
+        archive_removed_template_path(&tx, &destination)?;
         crate::projects::reclaim_hostname(
             &tx,
             &format!("{}.test", r.name),
@@ -1043,6 +1033,30 @@ fn create(
     })();
     cleanup_creation(result, &root, &stage_path)
 }
+fn archive_removed_template_path(conn: &rusqlite::Connection, destination: &Path) -> Result<()> {
+    use rusqlite::OptionalExtension;
+    let previous: Option<(String, bool)> = conn
+        .query_row(
+            "SELECT id,present FROM sites WHERE project_path=?1",
+            [destination.to_string_lossy().as_ref()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if let Some((id, present)) = previous {
+        if present {
+            return fail("A present project already owns the template destination");
+        }
+        conn.execute(
+            "UPDATE sites SET project_path=?2,hostname=?3 WHERE id=?1 AND present=0",
+            rusqlite::params![
+                id,
+                format!("archived-removed://{id}/{}", uuid::Uuid::new_v4()),
+                format!("removed-{id}.test")
+            ],
+        )?;
+    }
+    Ok(())
+}
 fn cleanup_creation(result: Result<()>, root: &Path, staging: &Path) -> Result<()> {
     if let Err(error) = crate::phase3::files::cleanup(root, staging) {
         tracing::warn!(%error, "project staging cleanup failed; creation result retained");
@@ -1052,6 +1066,85 @@ fn cleanup_creation(result: Result<()>, root: &Path, staging: &Path) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn template_replacement_archives_removed_identity_and_preserves_old_binding() {
+        let d = tempfile::tempdir().unwrap();
+        let home = Home::new(d.path());
+        home.ensure().unwrap();
+        let mut store = Store::open(&home.path("state.db")).unwrap();
+        let destination = home.www().join("blog");
+        std::fs::create_dir(&destination).unwrap();
+        crate::projects::scan(&mut store, &home.www()).unwrap();
+        let old: String = store
+            .conn
+            .query_row("SELECT id FROM sites WHERE name='blog'", [], |r| r.get(0))
+            .unwrap();
+        store.conn.execute("INSERT INTO runtime_installations VALUES('mysql:8','mysql','8','{}','runtimes/mysql/8',0)",[]).unwrap();
+        store.conn.execute("INSERT INTO project_databases VALUES(?1,'mysql:8','blog','old_user','old_secret','ready',0)",[&old]).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO site_runtime_overrides VALUES(?1,'mysql','8')",
+                [&old],
+            )
+            .unwrap();
+        store
+            .set_setting(&format!("site.{old}.disabled"), "true")
+            .unwrap();
+        std::fs::remove_dir(&destination).unwrap();
+        crate::projects::scan(&mut store, &home.www()).unwrap();
+        let fresh = uuid::Uuid::new_v4().to_string();
+        let tx = store.conn.transaction().unwrap();
+        archive_removed_template_path(&tx, &destination).unwrap();
+        tx.execute("INSERT INTO sites(id,name,hostname,project_path,project_type,document_root,present,discovered_at,updated_at) VALUES(?1,'blog','blog.test',?2,'static',?2,0,0,0)",rusqlite::params![fresh,destination.to_string_lossy()]).unwrap();
+        tx.commit().unwrap();
+        std::fs::create_dir(&destination).unwrap();
+        crate::projects::scan(&mut store, &home.www()).unwrap();
+        let current: String = store
+            .conn
+            .query_row(
+                "SELECT id FROM sites WHERE project_path=?1",
+                [destination.to_string_lossy().as_ref()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(current, fresh);
+        assert_ne!(current, old);
+        for table in [
+            "project_databases",
+            "site_runtime_overrides",
+            "project_processes",
+        ] {
+            let count: i64 = store
+                .conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE site_id=?1"),
+                    [&fresh],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+        assert!(
+            store
+                .setting(&format!("site.{fresh}.disabled"))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            crate::database::provision::bindings(&store).unwrap()[0].site_id,
+            old
+        );
+        let preserved: bool = store
+            .conn
+            .query_row(
+                "SELECT present=0 AND hostname=?2 FROM sites WHERE id=?1",
+                rusqlite::params![old, format!("removed-{old}.test")],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(preserved);
+    }
     #[test]
     fn cleanup_failure_does_not_turn_completed_creation_into_failure() {
         let d = tempfile::tempdir().unwrap();

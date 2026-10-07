@@ -9,6 +9,7 @@ pub mod desktop_instance;
 pub mod dns;
 #[cfg(feature = "desktop")]
 pub mod ipc;
+mod operation;
 pub mod platform;
 pub mod ports;
 pub mod process;

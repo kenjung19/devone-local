@@ -18,6 +18,8 @@ Fresh Homes use a DEVONE-generated P-256 root at `certs/devone-ca/root.crt` and 
 
 Existing Homes keep their legacy Caddy CA until you select **Upgrade HTTPS certificate authority** in Settings / HTTPS, Sites or Setup. Windows may display a trust confirmation. Cancelling retains legacy trust and restores the legacy served chain; select Upgrade again to resume. The old exact owned root is removed from trust only after replacement trust is confirmed, and old CA/certificate files remain in `backups/legacy-ca-*`. Recreate CA generates another constrained root and preserves the previous files in backups.
 
+If an interrupted upgrade cannot restore its legacy backup, Settings → HTTPS offers **Abandon upgrade and create new CA**, with explicit confirmation. It archives the current CA/PKI files and creates a new constrained root. Only roots matching recorded ownership can be removed from trust; an old trust entry whose certificate file is unavailable remains untouched. Install trust for the new CA afterwards. CA recreation records a recovery journal before moving files; startup restores the previous files after an interrupted recreation. Verify trust in Settings after recovery. Quit waits for CA file moves and recovery to finish safely.
+
 The CA directory and private key have protected Windows ACLs for the current user and SYSTEM. These ACLs do not block same-user npm/Composer processes; the certificate name constraints are the control for a stolen key. They do not sandbox malicious project code or prevent it from changing the user's own trust settings. See [Windows hardening](docs/windows-hardening.md) for verification and legacy-upgrade checks.
 
 ## Existing projects

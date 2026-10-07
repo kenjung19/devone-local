@@ -16,6 +16,7 @@ pub struct State {
     pub ca_present: bool,
     pub ca_trusted: bool,
     pub ca_upgrade_pending: bool,
+    pub ca_recovery_needed: bool,
     pub caddy: bool,
     pub php: bool,
     pub mysql: bool,
@@ -49,6 +50,7 @@ pub fn state(store: &Store, home: &Home) -> Result<State> {
         ca_present: ca.is_file(),
         ca_trusted: crate::platform::ca_trusted(&ca),
         ca_upgrade_pending: crate::tls::upgrade_pending(store, home)?,
+        ca_recovery_needed: crate::tls::recovery_needed(store, home)?,
         caddy: has(RuntimeType::Caddy),
         php: has(RuntimeType::Php),
         mysql: has(RuntimeType::Mysql)
