@@ -556,19 +556,28 @@ fn apply(app: &mut Application, action: Action) -> Result<Response> {
         }
         Action::ProjectsRoot { path } => {
             project_locations_idle(app)?;
-            crate::projects::locations::set_root(
+            let moved = crate::projects::locations::set_root(
                 &app.store,
                 &mut app.home,
                 path.as_deref().map(std::path::Path::new),
             )?;
             app.scan()?;
+            if moved > 0 {
+                message = Some(format!(
+                    "Projects folder changed. Settings, database links and processes were kept for {moved} moved project(s)."
+                ));
+            }
         }
         Action::ExternalProject { path, remove } => {
             project_locations_idle(app)?;
             if remove {
                 crate::projects::locations::remove(&app.store, std::path::Path::new(&path))?;
             } else {
-                crate::projects::locations::add(&app.store, std::path::Path::new(&path))?;
+                crate::projects::locations::add(
+                    &app.store,
+                    &app.home,
+                    std::path::Path::new(&path),
+                )?;
             }
             app.scan()?;
         }

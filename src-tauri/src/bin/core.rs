@@ -93,10 +93,12 @@ fn run() -> Result<()> {
             ctrlc::set_handler(move || stop.store(false, Ordering::Relaxed))
                 .map_err(|e| devone::core::Error::Message(e.to_string()))?;
             let app = Arc::new(Mutex::new(app));
-            let _watcher = devone::app::watcher::watch(app.clone())?;
+            let watcher = devone::app::watcher::watch(app.clone())?;
             while running.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(250));
             }
+            // Stop discovery before tearing services down, as the desktop does.
+            drop(watcher);
             app.lock()
                 .map_err(|_| devone::core::Error::Message("Core lock poisoned".into()))?
                 .shutdown()?;

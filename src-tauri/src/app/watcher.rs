@@ -71,7 +71,9 @@ fn configured_discovery_state(
             .map_err(|_| Error::Message("Core lock poisoned".into()))?;
         crate::projects::locations::external(&app.store)?
     };
-    let mut state = discovery_state(root)?;
+    // A missing Projects folder (e.g. unplugged drive) must not stop external
+    // projects from being polled; scan() reports the missing folder.
+    let mut state = discovery_state(root).unwrap_or_default();
     for path in external {
         let value = if crate::projects::locations::validate(&path).is_ok() {
             let (kind, root) = crate::projects::detect(&path);
@@ -111,11 +113,24 @@ fn sync_watches(
         let _ = watcher.unwatch(path);
     }
     watched.retain(|p| desired.contains(p));
+    // A folder that cannot be watched (network share, access denied) is
+    // still discovered by polling; report it instead of failing startup.
+    let mut failures = Vec::new();
     for path in desired.difference(watched).cloned().collect::<Vec<_>>() {
-        watcher
-            .watch(&path, notify::RecursiveMode::NonRecursive)
-            .map_err(|e| Error::Message(e.to_string()))?;
-        watched.insert(path);
+        match watcher.watch(&path, notify::RecursiveMode::NonRecursive) {
+            Ok(()) => {
+                watched.insert(path);
+            }
+            Err(e) => failures.push(format!("Discovery: Watch {}: {e}", path.display())),
+        }
+    }
+    if !failures.is_empty() {
+        let mut app = app
+            .lock()
+            .map_err(|_| Error::Message("Core lock poisoned".into()))?;
+        for failure in failures {
+            app.record_issue(failure);
+        }
     }
     Ok(())
 }
@@ -217,7 +232,24 @@ mod tests {
         ));
         let mut known = discovery_state(&home.www()).unwrap();
         let mut retry = None;
+        // A missing Projects folder is not a poll error: external projects
+        // keep being polled and scan() reports the folder.
         poll_discovery(&app, &home.path("missing"), &mut known, &mut retry);
+        assert!(
+            !app.lock()
+                .unwrap()
+                .issues
+                .iter()
+                .any(|i| i.starts_with("Discovery: Poll:"))
+        );
+        known = discovery_state(&home.www()).unwrap();
+        // Unreadable location settings are a transient poll error.
+        app.lock()
+            .unwrap()
+            .store
+            .set_setting("projects.external", "{not json")
+            .unwrap();
+        poll_discovery(&app, &home.www(), &mut known, &mut retry);
         assert!(
             app.lock()
                 .unwrap()
@@ -225,6 +257,11 @@ mod tests {
                 .iter()
                 .any(|i| i.starts_with("Discovery: Poll:"))
         );
+        app.lock()
+            .unwrap()
+            .store
+            .set_setting("projects.external", "[]")
+            .unwrap();
         poll_discovery(&app, &home.www(), &mut known, &mut retry);
         assert!(app.lock().unwrap().issues.is_empty());
         std::fs::create_dir(home.www().join("new-site")).unwrap();
@@ -410,7 +447,7 @@ mod tests {
                 .set_setting("projects.root", &path.to_string_lossy())
                 .unwrap();
             app.home.set_projects_root(Some(path));
-            crate::projects::locations::add(&app.store, &external).unwrap();
+            crate::projects::locations::add(&app.store, &app.home, &external).unwrap();
             app.scan().unwrap();
         }
         await_site(&app, "external-site", "php", true);

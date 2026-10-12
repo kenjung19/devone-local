@@ -94,7 +94,7 @@ impl Application {
             ))
         })?;
         let store = Store::open(&home.path("devone.db"))?;
-        crate::projects::locations::load_home(&store, &mut home)?;
+        let root_issue = crate::projects::locations::load_home(&store, &mut home)?;
         // Interrupted upgrades with no replacement trust restore the legacy
         // served chain before any automatic service starts, without a prompt.
         let ca_error = crate::tls::resume_recreate(&store, &home)
@@ -125,6 +125,10 @@ impl Application {
             shutting_down: false,
             last_routes: None,
         };
+        if let Some(issue) = root_issue {
+            tracing::warn!(%issue, "configured Projects folder ignored");
+            app.record_issue(issue);
+        }
         if let Some(error) = ca_error {
             tracing::error!(%error, "HTTPS CA startup recovery failed");
             app.record_issue(error);
