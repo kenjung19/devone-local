@@ -36,14 +36,20 @@ export function SetupRuntime({
   const installed = data.installed.some(
     (r) => r.manifest.runtime === kind && r.manifest.version === selected,
   );
+  const defaultInstalled = data.installed.some(
+    (r) =>
+      r.manifest.runtime === kind && r.manifest.version === data.defaults[kind],
+  );
   return (
     <div className="settings-row">
       <div>
         <strong>{kind === "caddy" ? "Web Server" : kind.toUpperCase()}</strong>
         <p>
-          {data.setup[kind]
-            ? "ติดตั้งแล้ว"
-            : "เลือกเวอร์ชันเริ่มต้นเฉพาะรุ่นที่ต้องการ หรือนำเข้า runtime ที่มีอยู่"}
+          {kind === "mysql" && defaultInstalled && !data.setup.mysql
+            ? "ติดตั้ง MySQL แล้ว ต้อง Initialize instance ก่อนพร้อมใช้งาน"
+            : data.setup[kind]
+              ? "ติดตั้งแล้ว"
+              : "เลือกเวอร์ชันเริ่มต้นเฉพาะรุ่นที่ต้องการ หรือนำเข้า runtime ที่มีอยู่"}
         </p>
         {kind === "caddy" && (
           <p>Caddy จัดการเว็บและ HTTPS ให้ DEVONE ติดตั้งได้จากปุ่มนี้</p>
@@ -99,23 +105,25 @@ export function SetupRuntime({
           </button>
         </div>
         {kind === "mysql" &&
-          data.setup.mysql &&
+          defaultInstalled &&
           !data.databases.some(
             (d) =>
               d.runtime_id === "mysql:" + data.defaults.mysql && d.initialized,
           ) && (
-            <button
-              disabled={busy}
-              onClick={() =>
-                void act({
-                  type: "database",
-                  runtime: { kind: "mysql", version: data.defaults.mysql },
-                  operation: "initialize",
-                })
-              }
-            >
-              Initialize MySQL instance
-            </button>
+            <div className="actions">
+              <button
+                disabled={busy}
+                onClick={() =>
+                  void act({
+                    type: "database",
+                    runtime: { kind: "mysql", version: data.defaults.mysql },
+                    operation: "initialize",
+                  })
+                }
+              >
+                Initialize MySQL instance
+              </button>
+            </div>
           )}
       </div>
       <button disabled={busy} onClick={() => importRuntime(kind)}>

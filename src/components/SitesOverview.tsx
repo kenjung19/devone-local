@@ -1,4 +1,6 @@
 import type { Snapshot, Action } from "../contracts";
+import { useState } from "react";
+import { bridge } from "../bridge";
 import {
   editorChoice,
   runtimeName,
@@ -21,6 +23,16 @@ export function SitesOverview({
   create: () => void;
 }) {
   const editor = editorChoice(data);
+  const [folderError, setFolderError] = useState("");
+  const addExisting = async () => {
+    try {
+      setFolderError("");
+      const path = await bridge.selectProjectFolder();
+      if (path) await act({ type: "external_project", path, remove: false });
+    } catch (e) {
+      setFolderError(String(e));
+    }
+  };
   const sites = [...data.sites].sort((a, b) => {
     const av = data.developer?.preferences[a.id],
       bv = data.developer?.preferences[b.id];
@@ -65,6 +77,18 @@ export function SitesOverview({
           <h2>Projects</h2>
           <div className="actions">
             <button
+              disabled={
+                busy ||
+                data.active ||
+                data.services.some(
+                  (s) => s.key.startsWith("site:") && s.status === "running",
+                )
+              }
+              onClick={() => void addExisting()}
+            >
+              Add existing project
+            </button>
+            <button
               disabled={busy}
               onClick={() => void act({ type: "open_folder", site_id: null })}
             >
@@ -75,10 +99,18 @@ export function SitesOverview({
             </button>
           </div>
         </div>
+        {folderError && (
+          <p className="panel-copy" role="alert">
+            {folderError}
+          </p>
+        )}
         {!sites.length ? (
           <div className="empty">
             <h3>No projects yet.</h3>
-            <p>Copy an existing project into www or create a new one.</p>
+            <p>
+              Choose Add existing project, copy a project into www, or create a
+              new one.
+            </p>
             <div className="actions empty-actions">
               <button
                 disabled={busy}

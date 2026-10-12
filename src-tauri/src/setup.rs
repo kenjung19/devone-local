@@ -41,9 +41,10 @@ pub fn state(store: &Store, home: &Home) -> Result<State> {
     let ca = crate::tls::CaddyTls.ca_path(home);
     Ok(State {
         completed: store.setting("setup.completed")?.as_deref() == Some("true"),
-        home_ready: ["www", "runtimes", "database", "config", "logs"]
-            .iter()
-            .all(|p| home.path(p).is_dir()),
+        home_ready: home.www().is_dir()
+            && ["runtimes", "database", "config", "logs"]
+                .iter()
+                .all(|p| home.path(p).is_dir()),
         dns_policy: crate::platform::wildcard_ready(),
         dns_system: crate::platform::wildcard_system_ready(),
         dns_server: crate::dns::server::cached_health(53),

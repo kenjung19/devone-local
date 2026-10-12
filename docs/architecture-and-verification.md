@@ -8,7 +8,7 @@ DEVONE Local ใช้ Tauri 2 + React + TypeScript + Vite และ Rust core �
 
 Setup wizard เลือก Caddy/PHP/MySQL จาก bundled catalog หรือนำเข้า distribution ที่เชื่อถือได้ ตั้ง wildcard DNS ผ่าน UAC helper เฉพาะ operation และเตรียม/trust CA สำหรับผู้ใช้ปัจจุบัน เลือกติดตั้งเฉพาะเวอร์ชันที่ต้องการ ไม่ต้องสร้าง manifest เอง
 
-ข้อมูลอยู่ `%LOCALAPPDATA%/Devone` แยกจาก application binaries: `www`, `database`, `runtimes`, `config`, SQLite, credentials, `certs`, `logs`, `cache`, `backups` Upgrade/reinstall และ uninstall ปกติเก็บ DEVONE Home ไว้ ไม่ลบโปรเจกต์หรือฐานข้อมูล
+บน Windows ข้อมูลอยู่ข้าง application executable โดยค่าเริ่มต้น: เช่น `D:\devone-local\devone-local.exe` ใช้ Home `D:\devone-local` ซึ่งมี `www`, `database`, `runtimes`, `config`, SQLite, credentials, `certs`, `logs`, `cache`, `backups` ต้องวางโปรแกรมในโฟลเดอร์ที่เขียนได้ กำหนด `DEVONE_HOME` หรือ `--home` เพื่อใช้ Home อื่นได้ ข้อมูลเดิมที่ `%LOCALAPPDATA%/Devone` ไม่ถูกย้ายหรือลบอัตโนมัติ Upgrade/reinstall และ uninstall ปกติเก็บ DEVONE Home ไว้ ไม่ลบโปรเจกต์หรือฐานข้อมูล
 
 ปิดหน้าต่าง = ซ่อนไป tray; watcher/DNS/services ทำงานต่อ เลือก **Quit DEVONE Local** เพื่อหยุด owned services เมนู tray เปิดแอป, Start/Stop/Restart, Sites และ Open www ได้ Settings แยก Start with Windows จาก Start environment automatically การเปิดแอปซ้ำสำหรับ Home เดิมจะเปิดหน้าต่างเดิม
 

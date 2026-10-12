@@ -311,3 +311,14 @@ pub fn choose_sql_file() -> Result<Option<PathBuf>> {
         fail("SQL file selection currently supports Windows")
     }
 }
+
+pub fn choose_project_folder() -> Result<Option<PathBuf>> {
+    #[cfg(windows)]
+    {
+        native::choose_project_folder()
+    }
+    #[cfg(not(windows))]
+    {
+        fail("Project folder selection currently supports Windows")
+    }
+}

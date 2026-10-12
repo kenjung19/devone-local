@@ -59,6 +59,8 @@ export interface Snapshot {
   tools?: Tool[];
   available_tools?: Tool[];
   home: string;
+  projects_root?: string;
+  external_projects?: string[];
   platform: string;
   sites: Site[];
   installed: Installation[];
@@ -222,6 +224,8 @@ export type Action =
     }
   | { type: "open_site" | "terminal"; site_id: string }
   | { type: "open_folder"; site_id: string | null }
+  | { type: "projects_root"; path: string | null }
+  | { type: "external_project"; path: string; remove: boolean }
   | { type: "php_config"; version: string; config: PhpConfig }
   | { type: "open_ini"; version: string };
 export interface Response {

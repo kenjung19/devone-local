@@ -244,6 +244,21 @@ main {
   font-size: 23px;
   font-weight: 500;
 }
+.tool-card .panel-buttons {
+  margin-top: 14px;
+  padding: 0;
+}
+.tool-card {
+  margin: 20px 22px;
+}
+.tool-card strong {
+  margin-top: 0;
+  margin-bottom: 6px;
+}
+.mail-controls > p {
+  flex-basis: 100%;
+  margin-bottom: 5px;
+}
 .panel {
   background: #171e2a;
   border: 1px solid #2c3546;
@@ -397,6 +412,10 @@ td {
 .runtime-row button {
   font-size: 11px;
 }
+.editor-details {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .default-tag {
   font-size: 9px;
   color: #86a9fc;
@@ -408,6 +427,64 @@ td {
   align-items: center;
   justify-content: space-between;
   gap: 20px;
+}
+.reopen-setup {
+  margin-bottom: 20px;
+}
+.settings-page .panel > p,
+.tools-panel.panel > p {
+  margin: 0;
+  padding: 20px 22px;
+  overflow-wrap: anywhere;
+}
+.settings-page .panel > .alert {
+  margin: 20px 22px;
+}
+.settings-page .alert > button {
+  display: block;
+  margin-top: 12px;
+  max-width: 100%;
+  white-space: normal;
+}
+.settings-page .panel-copy {
+  overflow-wrap: anywhere;
+}
+.settings-page .panel-copy > .panel:last-child {
+  margin-bottom: 0;
+}
+.settings-page .creation-fields {
+  min-width: 0;
+}
+.settings-page .creation-fields label,
+.settings-page .creation-fields input {
+  min-width: 0;
+}
+.settings-page .creation-fields input,
+.settings-page .creation-fields select {
+  border-color: #37455c;
+}
+.settings-page .creation-fields > button {
+  justify-self: start;
+  max-width: 100%;
+  white-space: normal;
+}
+.diagnostic-report {
+  margin: 0 22px 22px;
+}
+.external-project {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.external-project code {
+  min-width: 0;
+  flex: 1;
+}
+.project-locations > p + p {
+  margin-top: 12px;
 }
 .settings-row p {
   font-size: 12px;

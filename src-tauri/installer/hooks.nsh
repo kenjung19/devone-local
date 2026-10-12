@@ -1,6 +1,6 @@
-; Tauri owns installer files/shortcuts/ARP. User development data stays outside INSTDIR.
+; Tauri owns installer files/shortcuts/ARP. Home defaults to INSTDIR on Windows.
 !macro NSIS_HOOK_POSTINSTALL
-  DetailPrint "Projects, databases and runtimes are stored in the user's DEVONE Home."
+  DetailPrint "Projects, databases and runtimes default to the application folder (DEVONE Home)."
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL

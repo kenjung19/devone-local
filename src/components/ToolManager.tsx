@@ -11,15 +11,17 @@ export function ToolManager({
   return (
     <>
       {(["pnpm", "composer", "mailpit"] as const).map((id) => (
-        <section className="panel" key={id}>
-          <h2>
-            {id === "pnpm"
-              ? "pnpm"
-              : id === "mailpit"
-                ? "Mailpit (service tool)"
-                : "Composer"}{" "}
-            versions
-          </h2>
+        <section className="panel tools-panel" key={id}>
+          <div className="panel-header">
+            <h2>
+              {id === "pnpm"
+                ? "pnpm"
+                : id === "mailpit"
+                  ? "Mailpit (service tool)"
+                  : "Composer"}{" "}
+              versions
+            </h2>
+          </div>
           <p>
             {id === "mailpit"
               ? `Local mail service - ${data.developer?.mail.running ? "Running" : "Stopped"}`
@@ -42,7 +44,7 @@ export function ToolManager({
                   ? ""
                   : (data.defaults[id === "pnpm" ? "node" : "php"] ?? null);
               return (
-                <div className="stat" key={`${id}:${t.version}`}>
+                <div className="stat tool-card" key={`${id}:${t.version}`}>
                   <strong>
                     {id} {t.version}
                   </strong>
@@ -107,7 +109,7 @@ export function ToolManager({
               );
             })}
           {id === "mailpit" && (
-            <div className="panel-buttons">
+            <div className="panel-buttons mail-controls">
               <p>
                 Optional loopback-only mail service. SMTP{" "}
                 {data.developer?.mail.smtp_port ?? "not allocated"} · Mailbox{" "}

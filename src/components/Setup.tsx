@@ -104,6 +104,10 @@ export function Setup({
                 <span>{s.home_ready ? "พร้อมใช้งาน" : "ยังไม่พร้อม"}</span>
               </div>
               <p>
+                Projects folder:{" "}
+                <code>{data.projects_root ?? `${data.home}/www`}</code>
+              </p>
+              <p>
                 วางโฟลเดอร์โปรเจกต์ใน www แล้ว DEVONE
                 จะค้นพบโปรเจกต์ให้อัตโนมัติ
               </p>

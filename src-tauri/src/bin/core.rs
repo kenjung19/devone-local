@@ -7,7 +7,7 @@ use devone::{
 use std::{
     path::Path,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -92,25 +92,14 @@ fn run() -> Result<()> {
             let stop = running.clone();
             ctrlc::set_handler(move || stop.store(false, Ordering::Relaxed))
                 .map_err(|e| devone::core::Error::Message(e.to_string()))?;
-            use notify::Watcher;
-            let (tx, rx) = std::sync::mpsc::channel();
-            let mut watcher =
-                notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                    let _ = tx.send(event);
-                })
-                .map_err(|e| devone::core::Error::Message(e.to_string()))?;
-            watcher
-                .watch(&app.home.www(), notify::RecursiveMode::Recursive)
-                .map_err(|e| devone::core::Error::Message(e.to_string()))?;
+            let app = Arc::new(Mutex::new(app));
+            let _watcher = devone::app::watcher::watch(app.clone())?;
             while running.load(Ordering::Relaxed) {
-                if rx.recv_timeout(Duration::from_secs(1)).is_ok() {
-                    std::thread::sleep(Duration::from_millis(250));
-                    while rx.try_recv().is_ok() {}
-                    app.scan()?;
-                }
-                let _ = app.supervisor.states(&app.store)?;
+                std::thread::sleep(Duration::from_millis(250));
             }
-            app.shutdown()?;
+            app.lock()
+                .map_err(|_| devone::core::Error::Message("Core lock poisoned".into()))?
+                .shutdown()?;
         }
         _ => {
             return devone::core::fail(

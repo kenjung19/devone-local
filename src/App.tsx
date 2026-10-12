@@ -4,6 +4,7 @@ import { ErrorNotice } from "./components/ErrorNotice";
 import { NewProject } from "./components/NewProject";
 import { DatabaseManager } from "./components/DatabaseManager";
 import { DeveloperSettings, Diagnostics } from "./components/DeveloperSettings";
+import { ProjectLocations } from "./components/ProjectLocations";
 import { listen } from "@tauri-apps/api/event";
 import { ToolManager } from "./components/ToolManager";
 import { SiteDetail } from "./components/SiteDetail";
@@ -206,7 +207,7 @@ export default function App() {
               <h1>{site ? site.hostname : page}</h1>
               <p>
                 {page === "Sites"
-                  ? "Your projects, automatically discovered from www."
+                  ? "Projects from your selected www folder and registered folders."
                   : page === "Runtimes"
                     ? "Install once. Run different versions side by side."
                     : page === "Databases"
@@ -348,8 +349,9 @@ export default function App() {
                   <Logs key={logSite?.id ?? "all"} site={logSite} />
                 )}
                 {page === "Settings" && (
-                  <>
+                  <div className="settings-page">
                     <button
+                      className="reopen-setup"
                       disabled={busy}
                       onClick={() => {
                         setSetupDismissed(false);
@@ -371,13 +373,16 @@ export default function App() {
                         <dd>{data.platform}</dd>
                         <dt>Projects</dt>
                         <dd>
-                          <code>{data.home}/www</code>
+                          <code>
+                            {data.projects_root ?? `${data.home}/www`}
+                          </code>
                         </dd>
                         <dt>Home override</dt>
                         <dd>
                           Set DEVONE_HOME before launching. Restart required.
                         </dd>
                       </dl>
+                      <ProjectLocations data={data} busy={busy} act={act} />
                     </section>
                     <ProductSettings data={data} busy={busy} act={act} />
                     <DeveloperSettings data={data} busy={busy} act={act} />
@@ -401,39 +406,41 @@ export default function App() {
                       </p>
                       <details className="panel-copy">
                         <summary>Advanced catalog sources</summary>
-                        <p>
-                          Optional local override: config/runtime-catalog.json
-                          inside DEVONE Home.
-                        </p>
-                        <label>
-                          Remote catalog HTTPS URL
-                          <input
-                            value={catalogUrl}
-                            onChange={(e) => setCatalogUrl(e.target.value)}
-                          />
-                        </label>
-                        <label>
-                          Expected metadata SHA-256
-                          <input
-                            value={catalogHash}
-                            onChange={(e) => setCatalogHash(e.target.value)}
-                          />
-                        </label>
-                        <button
-                          disabled={busy || !catalogUrl || !catalogHash}
-                          onClick={() =>
-                            void act({
-                              type: "remote_catalog",
-                              url: catalogUrl,
-                              sha256: catalogHash,
-                            })
-                          }
-                        >
-                          Verify & refresh remote catalog
-                        </button>
+                        <div className="creation-fields">
+                          <p>
+                            Optional local override: config/runtime-catalog.json
+                            inside DEVONE Home.
+                          </p>
+                          <label>
+                            Remote catalog HTTPS URL
+                            <input
+                              value={catalogUrl}
+                              onChange={(e) => setCatalogUrl(e.target.value)}
+                            />
+                          </label>
+                          <label>
+                            Expected metadata SHA-256
+                            <input
+                              value={catalogHash}
+                              onChange={(e) => setCatalogHash(e.target.value)}
+                            />
+                          </label>
+                          <button
+                            disabled={busy || !catalogUrl || !catalogHash}
+                            onClick={() =>
+                              void act({
+                                type: "remote_catalog",
+                                url: catalogUrl,
+                                sha256: catalogHash,
+                              })
+                            }
+                          >
+                            Verify & refresh remote catalog
+                          </button>
+                        </div>
                       </details>
                     </section>
-                  </>
+                  </div>
                 )}
               </>
             )

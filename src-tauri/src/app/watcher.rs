@@ -41,7 +41,7 @@ fn poll_discovery(
     retry: &mut Option<Instant>,
 ) {
     // Read project metadata before taking the application lock, for events and polls alike.
-    let state = discovery_state(path);
+    let state = configured_discovery_state(app, path);
     if let Ok(mut app) = app.lock() {
         match state {
             Ok(state) => {
@@ -61,8 +61,65 @@ fn poll_discovery(
         }
     }
 }
+fn configured_discovery_state(
+    app: &Arc<Mutex<Application>>,
+    root: &Path,
+) -> Result<BTreeMap<PathBuf, String>> {
+    let external = {
+        let app = app
+            .lock()
+            .map_err(|_| Error::Message("Core lock poisoned".into()))?;
+        crate::projects::locations::external(&app.store)?
+    };
+    let mut state = discovery_state(root)?;
+    for path in external {
+        let value = if crate::projects::locations::validate(&path).is_ok() {
+            let (kind, root) = crate::projects::detect(&path);
+            let metadata = crate::projects::metadata::inspect(&path, kind)
+                .map(|m| serde_json::to_string(&m).unwrap_or_default())
+                .unwrap_or_else(|e| e.to_string());
+            format!("{kind}:{}:{metadata}", root.display())
+        } else {
+            "External project unavailable".into()
+        };
+        state.insert(path, value);
+    }
+    Ok(state)
+}
+fn sync_watches(
+    app: &Arc<Mutex<Application>>,
+    watcher: &mut impl notify::Watcher,
+    watched: &mut std::collections::BTreeSet<PathBuf>,
+) -> Result<()> {
+    let desired = {
+        let app = app
+            .lock()
+            .map_err(|_| Error::Message("Core lock poisoned".into()))?;
+        let mut paths = vec![app.home.www()];
+        for path in crate::projects::locations::external(&app.store)? {
+            if let Some(parent) = path.parent() {
+                paths.push(parent.to_path_buf());
+            }
+            paths.push(path);
+        }
+        paths
+            .into_iter()
+            .filter(|p| p.is_dir())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    for path in watched.difference(&desired) {
+        let _ = watcher.unwatch(path);
+    }
+    watched.retain(|p| desired.contains(p));
+    for path in desired.difference(watched).cloned().collect::<Vec<_>>() {
+        watcher
+            .watch(&path, notify::RecursiveMode::NonRecursive)
+            .map_err(|e| Error::Message(e.to_string()))?;
+        watched.insert(path);
+    }
+    Ok(())
+}
 pub fn watch(app: Arc<Mutex<Application>>) -> Result<WatchHandle> {
-    use notify::Watcher;
     let path = app
         .lock()
         .map_err(|_| Error::Message("Core lock poisoned".into()))?
@@ -73,17 +130,24 @@ pub fn watch(app: Arc<Mutex<Application>>) -> Result<WatchHandle> {
         let _ = tx.send(event);
     })
     .map_err(|e| Error::Message(e.to_string()))?;
-    watcher
-        .watch(&path, notify::RecursiveMode::NonRecursive)
-        .map_err(|e| Error::Message(e.to_string()))?;
-    let mut known = discovery_state(&path)?;
+    let mut watched = std::collections::BTreeSet::new();
+    sync_watches(&app, &mut watcher, &mut watched)?;
+    let mut known = configured_discovery_state(&app, &path).unwrap_or_default();
     let mut retry = None;
     let stop = Arc::new(AtomicBool::new(false));
     let running = stop.clone();
     let thread = std::thread::spawn(move || {
-        let _watcher = watcher;
         let mut last_scan = Instant::now();
         while !running.load(Ordering::Relaxed) {
+            let path = match app.lock() {
+                Ok(app) => app.home.www(),
+                Err(_) => break,
+            };
+            if let Err(e) = sync_watches(&app, &mut watcher, &mut watched)
+                && let Ok(mut app) = app.lock()
+            {
+                app.record_issue(format!("Watcher: {e}"));
+            }
             match rx.recv_timeout(Duration::from_millis(500)) {
                 Ok(event) => {
                     std::thread::sleep(Duration::from_millis(250));
@@ -318,6 +382,48 @@ mod tests {
         await_site(&app, "renamed", "php", true);
         std::fs::remove_dir(&renamed).unwrap();
         await_site(&app, "renamed", "php", false);
+        drop(handle);
+    }
+
+    #[test]
+    fn changed_root_and_external_project_markers_are_watched() {
+        let base = tempfile::tempdir().unwrap();
+        let app = Arc::new(Mutex::new(
+            Application::open_with_options(
+                Home::new(base.path().join("home")),
+                Options {
+                    system_setup: false,
+                    autostart: false,
+                },
+            )
+            .unwrap(),
+        ));
+        let handle = watch(app.clone()).unwrap();
+        let root = base.path().join("projects");
+        let external = base.path().join("other/external-site");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&external).unwrap();
+        {
+            let mut app = app.lock().unwrap();
+            let path = crate::projects::locations::validate(&root).unwrap();
+            app.store
+                .set_setting("projects.root", &path.to_string_lossy())
+                .unwrap();
+            app.home.set_projects_root(Some(path));
+            crate::projects::locations::add(&app.store, &external).unwrap();
+            app.scan().unwrap();
+        }
+        await_site(&app, "external-site", "php", true);
+        std::fs::create_dir(root.join("new-site")).unwrap();
+        await_site(&app, "new-site", "php", true);
+        std::fs::write(
+            external.join("package.json"),
+            r#"{"dependencies":{"vite":"1"}}"#,
+        )
+        .unwrap();
+        await_site(&app, "external-site", "vite", true);
+        std::fs::remove_dir_all(&external).unwrap();
+        await_site(&app, "external-site", "vite", false);
         drop(handle);
     }
 

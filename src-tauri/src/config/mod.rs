@@ -3,10 +3,14 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub struct Home {
     root: PathBuf,
+    projects: Option<PathBuf>,
 }
 impl Home {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            projects: None,
+        }
     }
     pub fn resolve() -> Result<Self> {
         let root = match std::env::var_os("DEVONE_HOME") {
@@ -25,7 +29,10 @@ impl Home {
         self.root.join(name)
     }
     pub fn www(&self) -> PathBuf {
-        self.path("www")
+        self.projects.clone().unwrap_or_else(|| self.path("www"))
+    }
+    pub fn set_projects_root(&mut self, path: Option<PathBuf>) {
+        self.projects = path;
     }
     pub fn runtime(&self, kind: &str, version: &str) -> PathBuf {
         self.path("runtimes").join(kind).join(version)

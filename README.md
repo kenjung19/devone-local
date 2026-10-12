@@ -6,9 +6,11 @@ A Windows development environment for PHP, MySQL, Node.js and static projects. R
 
 Use the current-user Windows x64 installer. Developer builds put it at `release/DEVONE-Local-0.1.0-Windows-x64-Setup.exe` with checksum metadata in `release/release-artifacts.json`. Binary installers are build output and are not committed to Git. Version 0.1.0 acceptance results and authorization policy are recorded in [Windows authorization readiness](docs/windows-authorization-readiness.md). Optional machine certification uses the [CMD acceptance workflows](scripts/acceptance/README.md).
 
+The full installer and `release/DEVONE-Local-0.1.0-Windows-x64-Portable.zip` include one PHP stable, MySQL LTS, Caddy stable and Node.js LTS version, pinned in `scripts/windows-bundle.json`. Extract the portable `devone-local` folder into a writable location and run its executable. These runtimes are already registered; additional versions can be installed later. Projects, database data, credentials and CA private keys are not bundled.
+
 ## First run
 
-Setup guides you through Home, Web Server, PHP, MySQL, Local Domains, HTTPS and readiness. Install only the versions you need. Node can wait until a Node project needs it. Enable automatic `.test` domains and HTTPS trust to open sites normally. Windows may request administrator permission for local domain setup.
+Setup guides you through Home, Web Server, PHP, MySQL, Local Domains, HTTPS and readiness. Full bundles already include the default runtime versions. Initialize MySQL when needed and enable automatic `.test` domains and HTTPS trust to open sites normally. Windows may request administrator permission for local domain setup.
 
 Setup is a full page and can be reopened from Settings. If you skip an incomplete item, Sites explains what remains unavailable.
 
@@ -51,7 +53,7 @@ Database restore preserves SQL `DEFINER` clauses for routines, events and trigge
 
 ## Where data is stored
 
-Home defaults to `%LOCALAPPDATA%\Devone`; Settings shows the actual path. Set `DEVONE_HOME` or pass desktop `--home` with another absolute path before launch. A Home change requires restart.
+On Windows, Home defaults to the folder containing the executable. For example, `D:\devone-local\devone-local.exe` uses `D:\devone-local\www` for projects and stores runtimes, databases and configuration alongside it. Put the application in a writable folder. Settings shows the actual Home path. Set `DEVONE_HOME` or pass desktop `--home` with another absolute path before launch to override it. A Home change requires restart. Existing data in `%LOCALAPPDATA%\Devone` is preserved and is not moved automatically; use an override to continue using that Home.
 
 | Folder | Contents |
 | --- | --- |
@@ -63,12 +65,16 @@ Home defaults to `%LOCALAPPDATA%\Devone`; Settings shows the actual path. Set `D
 
 Removing a project folder does not delete its database. Diagnostics is under Settings / Advanced. Review exported reports before sharing because they include local paths.
 
+Settings → General lets you choose a separate **Projects folder (www)** and register individual projects from other folders. New projects and Open www use the chosen root; registered external projects are scanned alongside its top-level folders. Stop the environment and project tasks before changing locations. Changes do not move or delete files, runtimes or databases. Removing an external folder from the list only stops its discovery; its saved site record and database bindings are retained. Paths are machine-local, must be existing absolute directories, and cannot contain symlinks/junctions. The watcher monitors these roots non-recursively and polls project markers; unavailable folders appear in discovery diagnostics.
+
 ## Build for developers
 
 Use the pinned toolchain; see [developer reference](docs/architecture-and-verification.md).
 
-```powershell
-. ./scripts/workspace-env.ps1
+Full Windows packaging also requires Python 3.11 or newer through `py -3`. `pnpm release:windows` downloads and verifies the pinned vendor archives, stages a fresh Home in the system temporary directory, and creates both the bundled installer and portable ZIP. It never packages an existing user Home. The staging drive needs space for the extracted runtimes; users do not need Python to run DEVONE.
+
+```cmd
+call scripts\workspace-env.cmd
 pnpm install --frozen-lockfile
 pnpm desktop
 # Build installer:

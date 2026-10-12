@@ -130,7 +130,8 @@ fn run() -> devone::core::Result<()> {
             devone::ipc::install_progress,
             devone::ipc::inspect_import,
             devone::ipc::read_log,
-            devone::ipc::select_sql_file
+            devone::ipc::select_sql_file,
+            devone::ipc::select_project_folder
         ])
         .build(tauri::generate_context!())
         .map_err(|e| devone::core::Error::Message(e.to_string()))?;

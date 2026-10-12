@@ -9,6 +9,7 @@ import { ToolManager } from "./ToolManager";
 import { describe, it, expect } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Setup } from "./Setup";
+import { SetupRuntime } from "./SetupRuntime";
 import { PhpDialog } from "./RuntimeDialogs";
 import { SiteDetail } from "./SiteDetail";
 import { ProductSettings } from "./ProductSettings";
@@ -106,6 +107,29 @@ const developer: NonNullable<Snapshot["developer"]> = {
 
 const act = async () => true;
 describe("desktop setup and configuration presentation", () => {
+  it("offers MySQL initialization before backend readiness and hides it after initialization", () => {
+    const mysql: Installation = {
+      ...php,
+      id: "mysql:9.7.2",
+      manifest: { ...php.manifest, runtime: "mysql", version: "9.7.2" },
+      relative_path: "runtimes/mysql/9.7.2",
+    };
+    const snapshot = {
+      ...data,
+      installed: [mysql],
+      defaults: { mysql: "9.7.2" },
+    };
+    const render = (value: Snapshot) => renderToStaticMarkup(
+      <SetupRuntime data={value} kind="mysql" busy={false} act={act} importRuntime={() => {}} />,
+    );
+    expect(render(snapshot)).toContain("Initialize MySQL instance");
+    expect(render(snapshot)).toContain("ติดตั้ง MySQL แล้ว");
+    expect(render({ ...snapshot, installed: [] })).not.toContain("Initialize MySQL instance");
+    expect(render({
+      ...snapshot,
+      databases: [{ runtime_id: "mysql:9.7.2", data_path: "database/mysql", initialized: true, port: null }],
+    })).not.toContain("Initialize MySQL instance");
+  });
   it("offers an explicit non-modal CA upgrade only for legacy/pending installs", () => {
     const legacy = { ...data, setup: { ...data.setup, caddy: true, ca_present: true, ca_trusted: true, ca_upgrade_pending: true } };
     const settings = renderToStaticMarkup(<ProductSettings data={legacy} busy={false} act={act} />);

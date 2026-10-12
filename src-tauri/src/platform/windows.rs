@@ -12,9 +12,14 @@ use windows_sys::Win32::{
     },
 };
 pub fn default_home() -> Result<PathBuf> {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .ok_or_else(|| crate::core::Error::Message("LOCALAPPDATA is unavailable".into()))?;
-    Ok(PathBuf::from(base).join("Devone"))
+    executable_home(&std::env::current_exe()?)
+}
+fn executable_home(executable: &Path) -> Result<PathBuf> {
+    executable
+        .parent()
+        .filter(|parent| parent.is_absolute())
+        .map(Path::to_path_buf)
+        .ok_or_else(|| crate::core::Error::Message("Executable directory is unavailable".into()))
 }
 pub fn is_link(path: &Path) -> Result<bool> {
     Ok(fs::symlink_metadata(path)?.file_attributes() & 0x400 != 0)
@@ -734,6 +739,36 @@ fn listener_owned_by(port: u16, owns: impl Fn(u32) -> bool) -> bool {
     }
 }
 /// Native Windows chooser; no PowerShell, developer toolchain or source scripts.
+pub fn choose_project_folder() -> Result<Option<PathBuf>> {
+    use windows_sys::Win32::{System::Com::*, UI::Shell::*};
+    let title: Vec<u16> = "Select a project folder\0".encode_utf16().collect();
+    let mut path = vec![0u16; 32768];
+    unsafe {
+        let result = CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
+        if result < 0 {
+            return fail("Windows could not initialize the folder chooser");
+        }
+        let mut info: BROWSEINFOW = std::mem::zeroed();
+        info.lpszTitle = title.as_ptr();
+        info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX;
+        let selected = SHBrowseForFolderW(&info);
+        let resolved = !selected.is_null()
+            && SHGetPathFromIDListEx(selected, path.as_mut_ptr(), path.len() as u32, 0) != 0;
+        CoTaskMemFree(selected.cast());
+        CoUninitialize();
+        if selected.is_null() {
+            return Ok(None);
+        }
+        if !resolved {
+            return fail("Choose a filesystem folder");
+        }
+    }
+    let length = path.iter().position(|v| *v == 0).unwrap_or(path.len());
+    Ok(Some(PathBuf::from(String::from_utf16_lossy(
+        &path[..length],
+    ))))
+}
+
 pub fn choose_sql_file() -> Result<Option<PathBuf>> {
     use windows_sys::Win32::UI::Controls::Dialogs::*;
     let mut file = vec![0u16; 32768];
@@ -771,6 +806,21 @@ pub fn choose_sql_file() -> Result<Option<PathBuf>> {
 
 #[cfg(test)]
 mod secret_tests {
+    #[test]
+    fn home_is_beside_executable() {
+        let executable = std::path::Path::new(r"D:\devone-local\devone-local.exe");
+        let home = super::executable_home(executable).unwrap();
+        assert_eq!(home, std::path::PathBuf::from(r"D:\devone-local"));
+        assert_eq!(
+            crate::config::Home::new(home).www(),
+            std::path::PathBuf::from(r"D:\devone-local\www")
+        );
+        assert_eq!(
+            super::default_home().unwrap(),
+            std::env::current_exe().unwrap().parent().unwrap()
+        );
+        assert!(super::executable_home(std::path::Path::new("devone-local.exe")).is_err());
+    }
     #[test]
     fn suspended_child_is_assigned_before_execution_and_failures_are_terminated() {
         use super::*;

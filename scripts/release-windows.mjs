@@ -54,3 +54,11 @@ for (const artifact of report)
 console.log(
   `Easy-to-find release output: ${copyReleaseOutput(root, directory, report)}`,
 );
+
+const bundled = spawnSync(
+  "py",
+  ["-3", join(root, "scripts/package-windows-bundle.py"), "--installer"],
+  { cwd: root, stdio: "inherit", shell: false },
+);
+if (bundled.error) throw bundled.error;
+if (bundled.status !== 0) process.exit(bundled.status ?? 1);

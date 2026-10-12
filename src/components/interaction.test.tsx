@@ -7,6 +7,8 @@ import { DatabaseManager } from "./DatabaseManager";
 import { SiteDetail } from "./SiteDetail";
 import App from "../App";
 import { ProductSettings } from "./ProductSettings";
+import { ProjectLocations } from "./ProjectLocations";
+import { SitesOverview } from "./SitesOverview";
 import { bridge } from "../bridge";
 import type { Installation, Manifest, Site, Snapshot } from "../contracts";
 
@@ -17,6 +19,7 @@ vi.mock("../bridge", () => ({
     snapshot: vi.fn(),
     inspectImport: vi.fn(),
     progress: vi.fn(),
+    selectProjectFolder: vi.fn(),
   },
 }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {} }));
@@ -100,6 +103,92 @@ async function input(placeholder: string, value: string) {
   });
 }
 describe("runtime dialogs", () => {
+  it("adds an existing folder directly from Sites without a creation request", async () => {
+    const execute = vi.fn(async () => true);
+    const create = vi.fn();
+    vi.mocked(bridge.selectProjectFolder).mockResolvedValue("F:/work/shop");
+    await act(async () =>
+      root.render(
+        <SitesOverview
+          data={data}
+          busy={false}
+          act={execute}
+          create={create}
+          view={() => {}}
+        />,
+      ),
+    );
+    await click("Add existing project");
+    expect(execute).toHaveBeenCalledWith({
+      type: "external_project",
+      path: "F:/work/shop",
+      remove: false,
+    });
+    expect(create).not.toHaveBeenCalled();
+  });
+  it("selects a projects root and registers an external folder without moving files", async () => {
+    const execute = vi.fn(async () => true);
+    vi.mocked(bridge.selectProjectFolder).mockResolvedValue("E:/Projects");
+    await act(async () =>
+      root.render(<ProjectLocations data={data} busy={false} act={execute} />),
+    );
+    await click("เลือก Projects folder");
+    await click("ใช้โฟลเดอร์นี้");
+    expect(execute).toHaveBeenCalledWith({
+      type: "projects_root",
+      path: "E:/Projects",
+    });
+    vi.mocked(bridge.selectProjectFolder).mockResolvedValue("F:/work/shop");
+    await click("เลือกโฟลเดอร์โปรเจกต์");
+    await click("เพิ่มโปรเจกต์");
+    expect(execute).toHaveBeenCalledWith({
+      type: "external_project",
+      path: "F:/work/shop",
+      remove: false,
+    });
+    await act(async () =>
+      root.render(
+        <ProjectLocations
+          data={{
+            ...data,
+            projects_root: "E:/Projects",
+            external_projects: ["F:/work/shop"],
+          }}
+          busy={false}
+          act={execute}
+        />,
+      ),
+    );
+    await click("เอาออกจากรายการ");
+    expect(execute).toHaveBeenCalledWith({
+      type: "external_project",
+      path: "F:/work/shop",
+      remove: true,
+    });
+    await click("กลับไปใช้ Home/www");
+    expect(execute).toHaveBeenCalledWith({ type: "projects_root", path: null });
+  });
+  it("folder picker cancellation leaves paths unchanged and active projects disable edits", async () => {
+    const execute = vi.fn(async () => true);
+    vi.mocked(bridge.selectProjectFolder).mockResolvedValue(null);
+    await act(async () =>
+      root.render(<ProjectLocations data={data} busy={false} act={execute} />),
+    );
+    await click("เลือก Projects folder");
+    expect(execute).not.toHaveBeenCalled();
+    await act(async () =>
+      root.render(
+        <ProjectLocations
+          data={{ ...data, active: true }}
+          busy={false}
+          act={execute}
+        />,
+      ),
+    );
+    expect([...host.querySelectorAll("button")].every((b) => b.disabled)).toBe(
+      true,
+    );
+  });
   it("a stale inspection cannot finish a newer inspection", async () => {
     const results: ((m: Manifest) => void)[] = [];
     vi.mocked(bridge.inspectImport).mockImplementation(

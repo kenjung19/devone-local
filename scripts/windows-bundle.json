@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "verified_on": "2026-10-08",
+  "manifests": [
+    {
+      "version": "8.5.11",
+      "download": "https://downloads.php.net/~windows/releases/archives/php-8.5.11-nts-Win32-vs17-x64.zip",
+      "binaries": {
+        "fastcgi": "php-cgi.exe",
+        "cli": "php.exe"
+      },
+      "sha256": "0ea96e0d2b9b737a6036f05cf4e95c49313faa6d0f27bd97edb2742503f0c043",
+      "metadata": {
+        "channel": "stable",
+        "source": "windows.php.net"
+      },
+      "platform": "windows-x64",
+      "runtime": "php"
+    },
+    {
+      "version": "9.7.2",
+      "download": "https://cdn.mysql.com/Downloads/MySQL-9.7/mysql-9.7.2-winx64.zip",
+      "binaries": {
+        "admin": "bin/mysqladmin.exe",
+        "server": "bin/mysqld.exe",
+        "client": "bin/mysql.exe"
+      },
+      "metadata": {
+        "source": "Oracle MySQL",
+        "channel": "LTS",
+        "archive_root": "mysql-9.7.2-winx64",
+        "vendor_md5": "657957207455a6a5b072f0d6cd1900a9"
+      },
+      "platform": "windows-x64",
+      "runtime": "mysql",
+      "sha256": "5592ea38e53edd67f5baa68303e7fcf2f0a40fc08978fdb4a7b0c38d12baea17"
+    },
+    {
+      "version": "2.11.7",
+      "download": "https://github.com/caddyserver/caddy/releases/download/v2.11.7/caddy_2.11.7_windows_amd64.zip",
+      "binaries": {
+        "server": "caddy.exe"
+      },
+      "sha256": "0a1edc0b799512051c57071ce0e798d3f2cf67dc98171366f1d2b326072e3b06",
+      "metadata": {
+        "source": "caddyserver/caddy"
+      },
+      "platform": "windows-x64",
+      "runtime": "caddy"
+    },
+    {
+      "runtime": "node",
+      "version": "24.21.0",
+      "platform": "windows-x64",
+      "binaries": {
+        "cli": "node.exe"
+      },
+      "download": "https://nodejs.org/dist/v24.21.0/node-v24.21.0-win-x64.zip",
+      "sha256": "158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541",
+      "metadata": {
+        "archive_root": "node-v24.21.0-win-x64",
+        "source": "nodejs.org",
+        "channel": "LTS"
+      }
+    }
+  ]
+}

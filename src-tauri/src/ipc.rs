@@ -115,6 +115,13 @@ pub enum Action {
     OpenFolder {
         site_id: Option<String>,
     },
+    ProjectsRoot {
+        path: Option<String>,
+    },
+    ExternalProject {
+        path: String,
+        remove: bool,
+    },
     Terminal {
         site_id: String,
     },
@@ -546,6 +553,24 @@ fn apply(app: &mut Application, action: Action) -> Result<Response> {
             let site = app.site(&site_id)?;
             crate::platform::open(&format!("https://{}", site.hostname))?;
             crate::phase3::preferences::update(&app.store, &site_id, "opened")?;
+        }
+        Action::ProjectsRoot { path } => {
+            project_locations_idle(app)?;
+            crate::projects::locations::set_root(
+                &app.store,
+                &mut app.home,
+                path.as_deref().map(std::path::Path::new),
+            )?;
+            app.scan()?;
+        }
+        Action::ExternalProject { path, remove } => {
+            project_locations_idle(app)?;
+            if remove {
+                crate::projects::locations::remove(&app.store, std::path::Path::new(&path))?;
+            } else {
+                crate::projects::locations::add(&app.store, std::path::Path::new(&path))?;
+            }
+            app.scan()?;
         }
         Action::OpenFolder { site_id } => {
             let path = if let Some(id) = site_id {
@@ -1140,6 +1165,42 @@ pub async fn select_sql_file() -> std::result::Result<Option<String>, String> {
         let selected =
             crate::platform::choose_sql_file()?.map(|path| path.to_string_lossy().into_owned());
         validate_sql_selection(selected)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
+fn project_locations_idle(app: &mut Application) -> Result<()> {
+    if app.active
+        || crate::phase3::templates::active(&app.home)
+        || crate::tools::tasks::list()
+            .iter()
+            .any(|t| t.status == "running")
+    {
+        return crate::core::fail(
+            "Stop the environment and wait for project tasks before changing project folders",
+        );
+    }
+    if app
+        .supervisor
+        .states(&app.store)?
+        .iter()
+        .any(|s| s.key.starts_with("site:") && s.status == "running")
+    {
+        return crate::core::fail("Stop running projects before changing project folders");
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn select_project_folder() -> std::result::Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| -> Result<Option<String>> {
+        crate::platform::choose_project_folder()?
+            .map(|p| {
+                crate::projects::locations::validate(&p).map(|p| p.to_string_lossy().into_owned())
+            })
+            .transpose()
     })
     .await
     .map_err(|e| e.to_string())?

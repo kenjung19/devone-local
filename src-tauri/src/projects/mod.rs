@@ -1,3 +1,4 @@
+pub mod locations;
 pub mod metadata;
 pub mod processes;
 pub mod vite;
@@ -109,18 +110,16 @@ pub struct Discovery {
     pub issues: Vec<String>,
 }
 pub fn scan(store: &mut Store, www: &Path) -> Result<Discovery> {
-    let mut entries = std::fs::read_dir(www)?.collect::<std::io::Result<Vec<_>>>()?;
-    entries.sort_by_key(|e| e.file_name());
+    let (paths, mut issues) = locations::discovery_paths(store, www)?;
     let mut detected = Vec::new();
-    let mut issues = Vec::new();
     let mut hosts: HashMap<String, usize> = HashMap::new();
-    for entry in entries {
-        // Symlinks/junctions are intentionally excluded to avoid escaping www.
-        if !entry.file_type()?.is_dir() || crate::platform::is_link(&entry.path())? {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        let (kind, root) = detect(&entry.path());
+    for path in paths {
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let (kind, root) = detect(&path);
         let host = match hostname(&name) {
             Ok(h) => h,
             Err(e) => {
@@ -129,7 +128,7 @@ pub fn scan(store: &mut Store, www: &Path) -> Result<Discovery> {
             }
         };
         *hosts.entry(host.clone()).or_default() += 1;
-        let meta = match metadata::inspect(&entry.path(), kind) {
+        let meta = match metadata::inspect(&path, kind) {
             Ok(meta) => meta,
             Err(e) => {
                 issues.push(format!("{name}: {e}"));
@@ -139,7 +138,7 @@ pub fn scan(store: &mut Store, www: &Path) -> Result<Discovery> {
                 }
             }
         };
-        detected.push((name, host, entry.path(), kind, root, meta));
+        detected.push((name, host, path, kind, root, meta));
     }
     let tx = store.conn.transaction()?;
     tx.execute("UPDATE sites SET present=0", [])?;

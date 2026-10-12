@@ -40,7 +40,9 @@ export function DeveloperSettings({
   return (
     <>
       <section className="panel">
-        <h2>Default Editor</h2>
+        <div className="panel-header">
+          <h2>Default Editor</h2>
+        </div>
         <p>
           Installed integrations are machine-local. Portable project
           configuration contains no editor paths.
@@ -49,7 +51,7 @@ export function DeveloperSettings({
           .filter((e) => e.category === "editor")
           .map((e) => (
             <div className="runtime-row" key={e.id}>
-              <div>
+              <div className="editor-details">
                 <strong>{e.name}</strong>
                 <small>{e.executable}</small>
               </div>
@@ -70,7 +72,7 @@ export function DeveloperSettings({
               </button>
             </div>
           ))}
-        <details>
+        <details className="panel-copy">
           <summary>Advanced: custom editor or database client</summary>
           <div className="creation-fields">
             <label>
@@ -113,7 +115,9 @@ export function DeveloperSettings({
         </details>
       </section>
       <section className="panel">
-        <h2>Templates</h2>
+        <div className="panel-header">
+          <h2>Templates</h2>
+        </div>
         <p>
           Built-in templates are bundled. Local custom JSON templates are read
           from {data.home}/config/templates. Opening this page never runs their
@@ -126,9 +130,9 @@ export function DeveloperSettings({
           Custom templates require a custom- ID, custom strategy, structured
           managed commands, relative files and exact SHA-256 for remote sources.
         </p>
-        <details>
+        <details className="panel-copy">
           <summary>Custom template example</summary>
-          <pre>
+          <pre className="task-log">
             {JSON.stringify(
               {
                 id: "custom-static",
@@ -147,30 +151,34 @@ export function DeveloperSettings({
         </details>
       </section>
       <section className="panel">
-        <h2>Backups</h2>
+        <div className="panel-header">
+          <h2>Backups</h2>
+        </div>
         <p>
           Manual database backups are available on the Databases page. Project
           source remains under your Git workflow. Automatic scheduling and
           deletion are not enabled.
         </p>
-        <label>
-          Future retention preference
-          <input
-            type="number"
-            min={1}
-            max={100}
-            value={keep}
-            onChange={(e) => setKeep(Number(e.target.value))}
-          />
-        </label>
-        <button
-          disabled={busy}
-          onClick={() =>
-            void act({ type: "backup_preferences", keep_last: keep })
-          }
-        >
-          Save preference
-        </button>
+        <div className="creation-fields">
+          <label>
+            Future retention preference
+            <input
+              type="number"
+              min={1}
+              max={100}
+              value={keep}
+              onChange={(e) => setKeep(Number(e.target.value))}
+            />
+          </label>
+          <button
+            disabled={busy}
+            onClick={() =>
+              void act({ type: "backup_preferences", keep_last: keep })
+            }
+          >
+            Save preference
+          </button>
+        </div>
       </section>
     </>
   );
@@ -187,12 +195,14 @@ export function Diagnostics({
   const [error, setError] = useState("");
   return (
     <section className="panel">
-      <h2>Diagnostics</h2>
+      <div className="panel-header">
+        <h2>Diagnostics</h2>
+      </div>
       <p>
         Check local DNS, CA, runtimes, managed services and ports. Reports
         contain local paths; review before sharing. Nothing is uploaded.
       </p>
-      <div className="actions">
+      <div className="panel-buttons">
         <button
           disabled={busy}
           onClick={() => void act({ type: "diagnostics", export: false })}
@@ -218,7 +228,9 @@ export function Diagnostics({
       </div>
       {error && <p role="alert">{error}</p>}
       {data.developer?.diagnostic_report && (
-        <pre className="task-log">{data.developer.diagnostic_report}</pre>
+        <pre className="task-log diagnostic-report">
+          {data.developer.diagnostic_report}
+        </pre>
       )}
     </section>
   );

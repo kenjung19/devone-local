@@ -10,6 +10,7 @@ import type {
 export const desktop = isTauri();
 export const bridge = {
   selectSqlFile: () => invoke<string | null>("select_sql_file"),
+  selectProjectFolder: () => invoke<string | null>("select_project_folder"),
   inspectImport: (kind: RuntimeKind, source: string) =>
     invoke<Manifest>("inspect_import", { kind, source }),
   progress: () => invoke<InstallProgress | null>("install_progress"),

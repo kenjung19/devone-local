@@ -23,6 +23,8 @@ use std::{
 pub struct Snapshot {
     pub developer: crate::phase3::View,
     pub home: String,
+    pub projects_root: String,
+    pub external_projects: Vec<String>,
     pub platform: String,
     pub sites: Vec<Site>,
     pub installed: Vec<Installation>,
@@ -78,7 +80,7 @@ impl Application {
             },
         )
     }
-    pub fn open_with_options(home: Home, options: Options) -> Result<Self> {
+    pub fn open_with_options(mut home: Home, options: Options) -> Result<Self> {
         home.ensure()?;
         let lock = std::fs::OpenOptions::new()
             .create(true)
@@ -92,6 +94,7 @@ impl Application {
             ))
         })?;
         let store = Store::open(&home.path("devone.db"))?;
+        crate::projects::locations::load_home(&store, &mut home)?;
         // Interrupted upgrades with no replacement trust restore the legacy
         // served chain before any automatic service starts, without a prompt.
         let ca_error = crate::tls::resume_recreate(&store, &home)
@@ -483,6 +486,11 @@ impl Application {
         Ok(Snapshot {
             developer,
             home: self.home.root().to_string_lossy().into(),
+            projects_root: self.home.www().to_string_lossy().into(),
+            external_projects: crate::projects::locations::external(&self.store)?
+                .into_iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
             platform: crate::platform::platform_key(),
             sites,
             installed,
