@@ -1,5 +1,6 @@
 import { SitesOverview } from "./components/SitesOverview";
 import { RuntimePanel } from "./components/RuntimePanel";
+import { Profiles } from "./components/Profiles";
 import { ErrorNotice } from "./components/ErrorNotice";
 import { NewProject } from "./components/NewProject";
 import { DatabaseManager } from "./components/DatabaseManager";
@@ -9,7 +10,6 @@ import { listen } from "@tauri-apps/api/event";
 import { ToolManager } from "./components/ToolManager";
 import { SiteDetail } from "./components/SiteDetail";
 import { ImportDialog, PhpDialog } from "./components/RuntimeDialogs";
-import { Setup } from "./components/Setup";
 import { ProductSettings } from "./components/ProductSettings";
 import type { InstallProgress } from "./contracts";
 import { Logs } from "./components/Logs";
@@ -21,6 +21,7 @@ type Page =
   | "New Project"
   | "Sites"
   | "Runtimes"
+  | "Profiles"
   | "Tools"
   | "Databases"
   | "Logs"
@@ -29,6 +30,7 @@ const pages: Page[] = [
   "Sites",
   "New Project",
   "Runtimes",
+  "Profiles",
   "Databases",
   "Tools",
   "Logs",
@@ -38,7 +40,6 @@ export default function App() {
   const [logSite, setLogSite] = useState<
     Snapshot["sites"][number] | undefined
   >();
-  const [setupDismissed, setSetupDismissed] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [progress, setProgress] = useState<InstallProgress | null>(null);
   const [catalogUrl, setCatalogUrl] = useState("");
@@ -58,7 +59,6 @@ export default function App() {
     const subscription = listen("devone-new-project", () => {
       setPage("New Project");
       setSelected(null);
-      setSetupDismissed(true);
     });
     return () => {
       void subscription.then((unlisten) => unlisten());
@@ -102,7 +102,6 @@ export default function App() {
     try {
       const result = await bridge.execute(action);
       setData(result.snapshot);
-      if (action.type === "finish_setup") setPage("Sites");
       if (result.message) setNotice(result.message);
       return true;
     } catch (e) {
@@ -117,35 +116,6 @@ export default function App() {
   };
   const site = data?.sites.find((s) => s.id === selected);
   const count = data ? availableSiteCount(data.sites) : 0;
-  if (data && !data.setup.completed && !setupDismissed) {
-    return (
-      <>
-        <Setup
-          data={data}
-          busy={busy}
-          error={error || pollError}
-          progress={progress}
-          act={act}
-          close={() => {
-            setSetupDismissed(true);
-            setPage("Sites");
-          }}
-          importRuntime={setImportKind}
-        />
-        {importKind && (
-          <ImportDialog
-            kind={importKind}
-            data={data}
-            busy={busy}
-            error={error}
-            close={() => setImportKind(null)}
-            act={act}
-          />
-        )}
-      </>
-    );
-  }
-
   return (
     <div className="app">
       <aside className="sidebar">
@@ -173,6 +143,7 @@ export default function App() {
                     "\u25eb",
                     "+",
                     "\u25c7",
+                    "\u25ce",
                     "\u25a4",
                     "\u2692",
                     "\u2261",
@@ -274,6 +245,22 @@ export default function App() {
             </p>
           )}
           <ErrorNotice error={error || pollError} />
+          {data && !data.setup.dns_system && (
+            <div className="alert">
+              Local .test domains are not enabled.{" "}
+              <button disabled={busy} onClick={() => void act({ type: "dns" })}>
+                Enable
+              </button>
+            </div>
+          )}
+          {data && !data.setup.ca_trusted && (
+            <div className="alert">
+              HTTPS CA is not trusted.{" "}
+              <button disabled={busy} onClick={() => void act({ type: "trust" })}>
+                Trust CA
+              </button>
+            </div>
+          )}
           {notice && (
             <div className="alert success" style={{ whiteSpace: "pre-wrap" }}>
               {notice}
@@ -289,6 +276,9 @@ export default function App() {
           ) : (
             data && (
               <>
+                {page === "Profiles" && (
+                  <Profiles data={data} busy={busy} act={act} />
+                )}
                 {page === "Sites" &&
                   (site ? (
                     <SiteDetail
@@ -354,11 +344,11 @@ export default function App() {
                       className="reopen-setup"
                       disabled={busy}
                       onClick={() => {
-                        setSetupDismissed(false);
+                        setPage("Settings");
                         void act({ type: "reopen_setup" });
                       }}
                     >
-                      เปิด Setup wizard อีกครั้ง
+                      Review configuration
                     </button>
                     <section className="panel">
                       <div className="panel-header">

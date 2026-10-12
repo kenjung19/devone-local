@@ -1,5 +1,6 @@
 import { editorChoice, siteStatus, siteProblems } from "../presentation";
 import { ErrorNotice } from "./ErrorNotice";
+import { SiteEnvironment } from "./SiteEnvironment";
 import { useState } from "react";
 import type { Site, Snapshot, Action, ProcessDefinition } from "../contracts";
 import { Provision } from "./Provision";
@@ -62,6 +63,7 @@ export function SiteDetail({
   });
   return (
     <>
+      <SiteEnvironment site={site} data={data} busy={busy} act={act} />
       <button className="back" onClick={back}>
         ← All sites
       </button>

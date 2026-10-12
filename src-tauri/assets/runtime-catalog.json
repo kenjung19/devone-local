@@ -61,6 +61,34 @@
       "runtime": "caddy"
     },
     {
+      "version": "2.4.66",
+      "download": "https://www.apachelounge.com/download/VS17/binaries/httpd-2.4.66-251206-Win64-VS17.zip",
+      "binaries": {
+        "server": "bin/httpd.exe"
+      },
+      "sha256": "7c78cda3aed9a6b5af7af640b6b961ae0566ab933bbbca3d39ef5dd3912386f3",
+      "metadata": {
+        "source": "Apache Lounge",
+        "archive_root": "Apache24"
+      },
+      "platform": "windows-x64",
+      "runtime": "apache"
+    },
+    {
+      "version": "1.28.3",
+      "download": "https://nginx.org/download/nginx-1.28.3.zip",
+      "binaries": {
+        "server": "nginx.exe"
+      },
+      "sha256": "aad7bf75d669ece7671688bfdf35f1093d6a30d2e62469405f4d55d8d82d5fd3",
+      "metadata": {
+        "source": "nginx.org",
+        "archive_root": "nginx-1.28.3"
+      },
+      "platform": "windows-x64",
+      "runtime": "nginx"
+    },
+    {
       "version": "8.4.11",
       "download": "https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.11-winx64.zip",
       "binaries": {

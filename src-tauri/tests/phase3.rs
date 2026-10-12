@@ -26,6 +26,7 @@ fn app(root: &Path) -> Application {
 }
 fn request(name: &str, template: &str) -> Request {
     Request {
+        profile_id: None,
         name: name.into(),
         template: template.into(),
         runtimes: BTreeMap::new(),

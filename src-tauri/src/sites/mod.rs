@@ -58,6 +58,9 @@ impl Site {
                 .filter(|p| p.enabled && p.definition.id == "vite")
                 .map(|p| p.key.clone()),
         );
+        if self.resolved.contains_key("web_server") {
+            keys.push(format!("web:{}", self.id));
+        }
         keys
     }
     pub fn required_kinds(&self) -> Vec<&str> {
@@ -74,6 +77,11 @@ impl Site {
     }
     pub fn route_identity(&self) -> String {
         format!("{:?}:{:?}", self.metadata.route, self.resolved)
+    }
+
+    pub fn web_server(&self) -> Option<(&str, &str)> {
+        let value = self.resolved.get("web_server")?;
+        value.split_once(':')
     }
 }
 

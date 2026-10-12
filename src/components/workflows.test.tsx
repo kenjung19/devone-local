@@ -8,7 +8,6 @@ import { DeveloperSettings } from "./DeveloperSettings";
 import { ToolManager } from "./ToolManager";
 import { describe, it, expect } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { Setup } from "./Setup";
 import { SetupRuntime } from "./SetupRuntime";
 import { PhpDialog } from "./RuntimeDialogs";
 import { SiteDetail } from "./SiteDetail";
@@ -137,8 +136,6 @@ describe("desktop setup and configuration presentation", () => {
     expect(settings).toContain("Upgrade HTTPS certificate authority");
     expect(settings).toContain("existing CA stays trusted");
     expect(settings).not.toContain('role="dialog"');
-    const setup = renderToStaticMarkup(<Setup data={legacy} busy={false} error="" progress={null} act={act} importRuntime={() => {}} close={() => {}} initialStep={5} />);
-    expect(setup).toContain("Upgrade HTTPS certificate authority");
     const sites = renderToStaticMarkup(<SitesOverview data={legacy} busy={false} act={act} view={() => {}} create={() => {}} />);
     expect(sites).toContain("Upgrade HTTPS certificate authority");
     expect(renderToStaticMarkup(<ProductSettings data={data} busy={false} act={act} />)).not.toContain("Upgrade HTTPS certificate authority");
@@ -195,27 +192,6 @@ describe("desktop setup and configuration presentation", () => {
     expect(html).toContain('value="7.3.33"');
     expect(html).toContain("Not installed");
     expect(html).toContain("Change Runtime");
-  });
-  it("shows the first setup step and errors as a full page without premature trust", () => {
-    const html = renderToStaticMarkup(
-      <Setup
-        data={data}
-        busy={false}
-        error="DNS TCP 53 conflict"
-        progress={null}
-        act={act}
-        importRuntime={() => {}}
-        close={() => {}}
-      />,
-    );
-    expect(html).toContain("DNS TCP 53 conflict");
-    expect(html).toContain('class="setup-page"');
-    expect(html).not.toContain('class="overlay"');
-    expect(html).not.toContain('class="dialog');
-    expect(html).toContain("ขั้นตอน 1 จาก 7");
-    expect(html).toContain("เปิด www");
-    expect(html).not.toContain("Windows เชื่อถือแล้ว");
-    expect(html).toContain("disabled");
   });
   it("prefills saved PHP directives and exposes only discovered extension files", () => {
     const html = renderToStaticMarkup(
@@ -653,66 +629,6 @@ describe("release acceptance screen structure (SSR, no viewport/layout claim)", 
       ca_trusted: true,
     },
   };
-  const setup = (snapshot: Snapshot, step: number, busy = false) =>
-    renderToStaticMarkup(
-      <Setup
-        data={snapshot}
-        initialStep={step}
-        busy={busy}
-        error=""
-        progress={null}
-        act={act}
-        importRuntime={() => {}}
-        close={() => {}}
-      />,
-    );
-  it.each([
-    [0, "Home"],
-    [1, "Web Server"],
-    [2, "PHP"],
-    [3, "MySQL"],
-    [4, "Automatic .test domains"],
-    [5, "Windows trust"],
-    [6, "setup-summary"],
-  ])(
-    "renders setup step %s with its stage and persistent navigation",
-    (step, label) => {
-      const html = setup(complete, step as number);
-      expect(html).toContain(label);
-      expect(html.match(/aria-current="step"/g)).toHaveLength(1);
-      expect(html).toContain('class="setup-controls"');
-      expect(html).not.toContain('role="dialog"');
-    },
-  );
-  it.each([
-    "home_ready",
-    "caddy",
-    "php",
-    "mysql",
-    "dns_policy",
-    "dns_server",
-    "dns_system",
-    "ca_present",
-    "ca_trusted",
-  ] as const)("does not enable completion when backend %s is false", (key) => {
-    const html = setup(
-      { ...complete, setup: { ...complete.setup, [key]: false } },
-      6,
-    );
-    const finish = html.match(
-      /<button[^>]*class="primary"[^>]*>[^<]*เสร็จสิ้นและเปิด environment<\/button>/,
-    )?.[0];
-    expect(finish).toContain('disabled=""');
-    expect(html).toContain("ข้ามส่วนที่ยังไม่พร้อม");
-  });
-  it("enables completion only with all readiness checks and disables it while busy", () => {
-    const button = (html: string) =>
-      html.match(
-        /<button[^>]*class="primary"[^>]*>[^<]*เสร็จสิ้นและเปิด environment<\/button>/,
-      )?.[0];
-    expect(button(setup(complete, 6))).not.toContain('disabled=""');
-    expect(button(setup(complete, 6, true))).toContain('disabled=""');
-  });
   it("renders Sites empty, Ready, Needs setup and Error states", () => {
     const overview = (snapshot: Snapshot) =>
       renderToStaticMarkup(

@@ -49,6 +49,8 @@ pub struct Request {
     pub name: String,
     pub template: String,
     #[serde(default)]
+    pub profile_id: Option<String>,
+    #[serde(default)]
     pub runtimes: BTreeMap<String, String>,
     #[serde(default)]
     pub tools: BTreeMap<String, String>,
@@ -918,6 +920,15 @@ fn create(
                 tracing::error!(error=%undo, "could not return unregistered project to staging");
             }
             return Err(error.into());
+        }
+        if let Some(profile_id) = r.profile_id.as_deref() {
+            crate::profiles::apply(&store, &site_id, profile_id)?;
+            for (kind, version) in &r.runtimes {
+                store.conn.execute(
+                    "INSERT INTO site_runtime_overrides(site_id,kind,version) VALUES(?1,?2,?3) ON CONFLICT(site_id,kind) DO UPDATE SET version=excluded.version",
+                    rusqlite::params![site_id, kind, version],
+                )?;
+            }
         }
         {
             let mut all = jobs().lock().unwrap_or_else(|e| e.into_inner());

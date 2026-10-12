@@ -77,7 +77,7 @@ impl RuntimeManifest {
         let required: &[&str] = match self.runtime {
             RuntimeType::Php => &["cli", "fastcgi"],
             RuntimeType::Mysql => &["server", "admin"],
-            RuntimeType::Caddy => &["server"],
+            RuntimeType::Caddy | RuntimeType::Apache | RuntimeType::Nginx => &["server"],
             RuntimeType::Node => &["cli"],
             _ => &[],
         };

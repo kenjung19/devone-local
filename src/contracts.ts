@@ -1,4 +1,24 @@
-export type RuntimeKind = "php" | "mysql" | "caddy" | "node";
+export type RuntimeKind =
+  | "php"
+  | "mysql"
+  | "caddy"
+  | "apache"
+  | "nginx"
+  | "node";
+export interface ProfileBinding {
+  provider: string;
+  version: string | null;
+}
+export interface EnvironmentProfile {
+  id: string;
+  name: string;
+  description: string;
+  bindings: Record<string, ProfileBinding>;
+  tools: Record<string, string | null>;
+  built_in: boolean;
+  created_at: number;
+  updated_at: number;
+}
 export interface RuntimeRef {
   kind: RuntimeKind;
   version: string;
@@ -35,6 +55,7 @@ export interface Site {
   https: string;
   discovered_at: number;
   updated_at: number;
+  last_applied_profile_id?: string | null;
   metadata?: ProjectMetadata;
   processes?: ProjectProcess[];
 }
@@ -56,6 +77,7 @@ export interface Snapshot {
   developer?: Developer;
   tool_defaults?: Record<string, string>;
   dependency_tasks?: DependencyTask[];
+  profiles?: EnvironmentProfile[];
   tools?: Tool[];
   available_tools?: Tool[];
   home: string;
@@ -85,6 +107,8 @@ export interface Snapshot {
     ca_upgrade_pending?: boolean;
     ca_recovery_needed?: boolean;
     caddy: boolean;
+    apache?: boolean;
+    nginx?: boolean;
     php: boolean;
     mysql: boolean;
   };
@@ -227,7 +251,11 @@ export type Action =
   | { type: "projects_root"; path: string | null }
   | { type: "external_project"; path: string; remove: boolean }
   | { type: "php_config"; version: string; config: PhpConfig }
-  | { type: "open_ini"; version: string };
+  | { type: "open_ini"; version: string }
+  | { type: "save_profile"; profile: EnvironmentProfile }
+  | { type: "delete_profile"; profile_id: string }
+  | { type: "apply_profile"; site_id: string; profile_id: string }
+  | { type: "set_web_server"; site_id: string; binding: string };
 export interface Response {
   snapshot: Snapshot;
   message: string | null;
@@ -301,6 +329,7 @@ export interface Template {
 export interface CreateRequest {
   name: string;
   template: string;
+  profile_id: string | null;
   runtimes: Record<string, string>;
   tools: Record<string, string>;
   install_dependencies: boolean;

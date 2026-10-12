@@ -302,7 +302,10 @@ pub fn binary_roles(kind: &crate::core::RuntimeType) -> BTreeMap<String, String>
             ("admin", "bin/mysqladmin"),
             ("client", "bin/mysql"),
         ],
-        _ => &[("server", "caddy")],
+               crate::core::RuntimeType::Caddy => &[("server", "caddy")],
+               crate::core::RuntimeType::Apache => &[("server", "bin/httpd")],
+               crate::core::RuntimeType::Nginx => &[("server", "nginx")],
+               crate::core::RuntimeType::Other(_) => &[],
     };
     pairs
         .iter()

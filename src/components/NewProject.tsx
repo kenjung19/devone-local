@@ -21,6 +21,8 @@ export function NewProject({
 }) {
   const [name, setName] = useState("");
   const [templateId, setTemplate] = useState("static");
+  const [profileId, setProfileId] = useState("builtin-static");
+  const [advanced, setAdvanced] = useState(false);
   const [runtimes, setRuntimes] = useState<Record<string, string>>(
     initialVersions(data),
   );
@@ -81,6 +83,7 @@ export function NewProject({
     const request: CreateRequest = {
       name,
       template: template.id,
+      profile_id: profileId || null,
       runtimes: Object.fromEntries(kinds.map((k) => [k, runtimes[k] ?? ""])),
       tools: Object.fromEntries(managers.map((k) => [k, tools[k] ?? ""])),
       install_dependencies: install && kinds.includes("node"),
@@ -114,6 +117,80 @@ export function NewProject({
               maxLength={63}
             />
           </label>
+          <label>
+            Environment Profile
+            <select
+              value={profileId}
+              onChange={(event) => {
+                const id = event.target.value;
+                setProfileId(id);
+                const profile = data.profiles?.find((item) => item.id === id);
+                if (!profile) return;
+                setRuntimes((current) => ({
+                  ...current,
+                  ...Object.fromEntries(
+                    Object.entries(profile.bindings)
+                      .filter(([, binding]) => binding.version !== "none")
+                      .filter(([kind]) => kind !== "web_server")
+                      .map(([kind, binding]) => [
+                        kind,
+                        binding.version ?? data.defaults[binding.provider] ?? "",
+                      ]),
+                  ),
+                }));
+              }}
+            >
+              <option value="">No profile</option>
+              {(data.profiles ?? []).map((profile) => (
+                <option key={profile.id} value={profile.id}>
+                  {profile.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button type="button" onClick={() => setAdvanced(!advanced)}>
+            Advanced / Customize {advanced ? "−" : "+"}
+          </button>
+          {!advanced && (
+            <p className="panel-copy">
+              The profile supplies the initial environment. Open Advanced to customize individual runtimes.
+            </p>
+          )}
+          {!advanced &&
+            missing.map((kind) => (
+              <div key={kind} role="alert">
+                {kind} {runtimes[kind] || "version"} is not installed.{" "}
+                <button
+                  disabled={
+                    busy ||
+                    !runtimes[kind] ||
+                    !data.available.some(
+                      (runtime) =>
+                        runtime.runtime === kind &&
+                        runtime.version === runtimes[kind],
+                    )
+                  }
+                  onClick={() =>
+                    void act({
+                      type: "install",
+                      runtime: {
+                        kind: kind as RuntimeKind,
+                        version: runtimes[kind],
+                      },
+                    })
+                  }
+                >
+                  Install selected {kind}
+                </button>
+              </div>
+            ))}
+          {!advanced &&
+            missingTools.map((tool) => (
+              <p key={tool} role="alert">
+                Selected {tool} is not installed. Open Advanced to choose or
+                install a version.
+              </p>
+            ))}
           <fieldset className="template-picker">
             <legend>Choose a template</legend>
             <div className="template-grid">
@@ -125,6 +202,15 @@ export function NewProject({
                   disabled={!!active || busy}
                   onClick={() => {
                     setTemplate(t.id);
+                    setProfileId(
+                      t.id === "laravel"
+                        ? "builtin-laravel"
+                        : t.id === "node"
+                          ? "builtin-node"
+                          : ["blank-php", "wordpress"].includes(t.id)
+                            ? "builtin-php"
+                            : "builtin-static",
+                    );
                     setInstall(false);
                     setMail(false);
                     setNode(false);
@@ -156,6 +242,8 @@ export function NewProject({
               leading/trailing hyphens.
             </p>
           )}
+          {advanced && (
+            <>
           {templateId === "laravel" && (
             <label>
               <input
@@ -311,6 +399,8 @@ export function NewProject({
               />{" "}
               Configure the running Mailpit for this new project
             </label>
+          )}
+            </>
           )}
           {template?.custom && (
             <p role="alert">

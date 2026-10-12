@@ -41,6 +41,8 @@ pub enum RuntimeType {
     Php,
     Mysql,
     Caddy,
+    Apache,
+    Nginx,
     Node,
     Other(String),
 }
@@ -50,6 +52,8 @@ impl RuntimeType {
             Self::Php => "php",
             Self::Mysql => "mysql",
             Self::Caddy => "caddy",
+            Self::Apache => "apache",
+            Self::Nginx => "nginx",
             Self::Node => "node",
             Self::Other(v) => v,
         }

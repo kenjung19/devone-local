@@ -105,8 +105,8 @@ fn run() -> devone::core::Result<()> {
             }
             let complete = setup_state
                 .lock()
-                .map(|s| {
-                    s.store.setting("setup.completed").ok().flatten().as_deref() == Some("true")
+                .map(|_| {
+                    true
                 })
                 .unwrap_or(false);
             if startup

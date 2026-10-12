@@ -488,7 +488,7 @@ mod tests {
         assert_eq!(
             app.issues,
             [
-                "Import Caddy and set it as default to serve sites",
+                "Install Caddy for the DEVONE ingress before starting sites",
                 "Watcher: failed"
             ]
         );

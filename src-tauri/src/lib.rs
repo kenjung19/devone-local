@@ -15,6 +15,7 @@ pub mod ports;
 pub mod process;
 pub mod projects;
 pub mod runtime;
+pub mod profiles;
 pub mod sites;
 pub mod storage;
 pub mod tls;

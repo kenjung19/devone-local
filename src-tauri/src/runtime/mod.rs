@@ -178,7 +178,12 @@ fn copy_tree(source: &Path, target: &Path) -> Result<()> {
 pub fn inspect_import(kind: RuntimeType, root: &Path) -> Result<RuntimeManifest> {
     if !matches!(
         kind,
-        RuntimeType::Php | RuntimeType::Mysql | RuntimeType::Caddy | RuntimeType::Node
+        RuntimeType::Php
+            | RuntimeType::Mysql
+            | RuntimeType::Caddy
+            | RuntimeType::Apache
+            | RuntimeType::Nginx
+            | RuntimeType::Node
     ) {
         return fail("Unsupported runtime");
     }
@@ -192,10 +197,10 @@ pub fn inspect_import(kind: RuntimeType, root: &Path) -> Result<RuntimeManifest>
         "server"
     };
     let path = root.join(&binaries[role]);
-    let arg = if kind == RuntimeType::Caddy {
-        "version"
-    } else {
-        "--version"
+    let arg = match kind {
+        RuntimeType::Caddy => "version",
+        RuntimeType::Apache | RuntimeType::Nginx => "-v",
+        _ => "--version",
     };
     let output = crate::process::run_checked(
         &path,
@@ -246,10 +251,10 @@ pub fn validate_at(manifest: &RuntimeManifest, root: &Path) -> Result<String> {
     let bin = root.join(manifest.binaries.get(role).ok_or_else(|| {
         crate::core::Error::Message("Runtime does not expose a health binary".into())
     })?);
-    let arg = if manifest.runtime == RuntimeType::Caddy {
-        "version"
-    } else {
-        "--version"
+    let arg = match manifest.runtime {
+        RuntimeType::Caddy => "version",
+        RuntimeType::Apache | RuntimeType::Nginx => "-v",
+        _ => "--version",
     };
     let output = crate::process::run_checked(
         &bin,
@@ -299,7 +304,12 @@ pub fn import(
     manifest.validate()?;
     if !matches!(
         manifest.runtime,
-        RuntimeType::Php | RuntimeType::Mysql | RuntimeType::Caddy | RuntimeType::Node
+        RuntimeType::Php
+            | RuntimeType::Mysql
+            | RuntimeType::Caddy
+            | RuntimeType::Apache
+            | RuntimeType::Nginx
+            | RuntimeType::Node
     ) {
         return fail("Unsupported runtime execution");
     }
@@ -513,6 +523,20 @@ pub fn verify_archive_checksum(data: &[u8], checksum: &str) -> Result<()> {
     Ok(())
 }
 pub fn remove(store: &Store, home: &Home, reference: &RuntimeRef) -> Result<()> {
+    if matches!(
+        &reference.kind,
+        RuntimeType::Caddy | RuntimeType::Apache | RuntimeType::Nginx
+    ) {
+        let binding = format!("{}:{}", reference.kind.key(), reference.version);
+        let used: bool = store.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM site_runtime_overrides WHERE kind='web_server' AND version=?1)",
+            [&binding],
+            |row| row.get(0),
+        )?;
+        if used {
+            return fail("Runtime is still bound to a site");
+        }
+    }
     let runtime = find(store, reference)?;
     let used: bool = store.conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM site_runtime_overrides WHERE kind=?1 AND version=?2)",

@@ -15,14 +15,17 @@ export function RuntimePanel({
 }) {
   return (
     <>
-      {(["php", "node", "mysql", "caddy"] as const).map((kind) => (
+      {(["caddy", "apache", "nginx", "php", "node", "mysql"] as const).map(
+        (kind) => (
         <section className="panel" key={kind}>
           <div className="panel-header">
             <div>
               <h2>{runtimeName(kind)}</h2>
               <p>
-                {kind === "caddy"
-                  ? "Local web routing and HTTPS"
+                {["caddy", "apache", "nginx"].includes(kind)
+                  ? kind === "caddy"
+                    ? "Stable local HTTPS ingress and a selectable site Web Server"
+                    : "Selectable site Web Server running behind the stable HTTPS ingress"
                   : "Install the versions your projects need. No automatic upgrades."}
               </p>
             </div>
@@ -138,7 +141,8 @@ export function RuntimePanel({
             </button>
           </details>
         </section>
-      ))}
+        ),
+      )}
     </>
   );
 }

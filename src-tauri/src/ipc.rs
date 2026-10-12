@@ -175,6 +175,20 @@ pub enum Action {
     OpenIni {
         version: String,
     },
+    SaveProfile {
+        profile: crate::profiles::EnvironmentProfile,
+    },
+    DeleteProfile {
+        profile_id: String,
+    },
+    ApplyProfile {
+        site_id: String,
+        profile_id: String,
+    },
+    SetWebServer {
+        site_id: String,
+        binding: String,
+    },
 }
 #[derive(Serialize)]
 pub struct Response {
@@ -183,10 +197,56 @@ pub struct Response {
     pub credential: Option<String>,
 }
 fn apply(app: &mut Application, action: Action) -> Result<Response> {
+    let action = match action {
+        Action::SaveProfile { profile } => {
+            let name = crate::profiles::save(&app.store, profile)?.name;
+            return Ok(Response {
+                snapshot: app.snapshot()?,
+                message: Some(format!("Saved environment profile {name}")),
+                credential: None,
+            });
+        }
+        Action::DeleteProfile { profile_id } => {
+            crate::profiles::delete(&app.store, &profile_id)?;
+            return Ok(Response {
+                snapshot: app.snapshot()?,
+                message: Some("Deleted environment profile".into()),
+                credential: None,
+            });
+        }
+        Action::ApplyProfile { site_id, profile_id } => {
+            app.apply_profile(&site_id, &profile_id)?;
+            return Ok(Response {
+                snapshot: app.snapshot()?,
+                message: Some("Applied profile to this site only".into()),
+                credential: None,
+            });
+        }
+        Action::SetWebServer { site_id, binding } => {
+            app.set_web_server(&site_id, &binding)?;
+            return Ok(Response {
+                snapshot: app.snapshot()?,
+                message: Some("Updated this site's Web Server binding".into()),
+                credential: None,
+            });
+        }
+        action => action,
+    };
     let mut message = None;
     let mut credential = None;
     match action {
+        Action::SaveProfile { .. }
+        | Action::DeleteProfile { .. }
+        | Action::ApplyProfile { .. }
+        | Action::SetWebServer { .. } => unreachable!("profile actions are handled before dispatch"),
         Action::CreateProject { request } => {
+            if let Some(profile_id) = request.profile_id.as_deref()
+                && !crate::profiles::list(&app.store)?
+                    .iter()
+                    .any(|profile| profile.id == profile_id)
+            {
+                return crate::core::fail("Unknown environment profile");
+            }
             let template = crate::phase3::templates::registry(&app.home)?
                 .into_iter()
                 .find(|t| t.id == request.template)
@@ -621,7 +681,9 @@ fn apply(app: &mut Application, action: Action) -> Result<Response> {
             crate::setup::finish(&app.store, &app.home, skip)?;
             app.start_all()?;
         }
-        Action::ReopenSetup => app.store.set_setting("setup.completed", "false")?,
+        Action::ReopenSetup => {
+            return crate::core::fail("The Setup wizard was removed; use Settings and Runtimes")
+        }
         Action::RemoteCatalog { url, sha256 } => {
             crate::catalog::refresh_source(
                 &app.store,

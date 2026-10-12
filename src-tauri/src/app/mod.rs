@@ -46,6 +46,7 @@ pub struct Snapshot {
     pub available_tools: Vec<crate::tools::Tool>,
     pub tool_defaults: BTreeMap<String, String>,
     pub dependency_tasks: Vec<crate::tools::tasks::Task>,
+    pub profiles: Vec<crate::profiles::EnvironmentProfile>,
 }
 #[derive(Clone, Copy)]
 pub struct Options {
@@ -212,7 +213,7 @@ impl Application {
         }
     }
     pub fn sites(&self) -> Result<Vec<Site>> {
-        let mut stmt=self.store.conn.prepare("SELECT id,name,hostname,project_path,project_type,document_root,present,issue,discovered_at,updated_at,metadata FROM sites ORDER BY name")?;
+        let mut stmt=self.store.conn.prepare("SELECT id,name,hostname,project_path,project_type,document_root,present,issue,discovered_at,updated_at,metadata,last_applied_profile_id FROM sites ORDER BY name")?;
         let rows = stmt.query_map([], |r| {
             Ok(Site {
                 id: r.get(0)?,
@@ -228,7 +229,11 @@ impl Application {
                 overrides: BTreeMap::new(),
                 local_overrides: BTreeMap::new(),
                 resolved: BTreeMap::new(),
-                runtime_sources: BTreeMap::new(),
+                runtime_sources: r
+                    .get::<_, Option<String>>(11)?
+                    .map(|id| ("__profile".into(), id))
+                    .into_iter()
+                    .collect(),
                 status: "stopped".into(),
                 https: "unavailable".into(),
                 metadata: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or_default(),
@@ -257,6 +262,24 @@ impl Application {
                 site.overrides.entry(k.clone()).or_insert(v.clone());
             }
             site.processes = crate::projects::processes::list(&self.store, site)?;
+            let web_server = site
+                .overrides
+                .get("web_server")
+                .cloned()
+                .or(self.store.setting("default.web_server")?)
+                .or_else(|| {
+                    self.store
+                        .setting("default.caddy")
+                        .ok()
+                        .flatten()
+                        .map(|version| format!("caddy:{version}"))
+                });
+            if let Some(web_server) = web_server {
+                site.runtime_sources
+                    .entry("web_server".into())
+                    .or_insert("Global default".into());
+                site.resolved.insert("web_server".into(), web_server);
+            }
             for kind in [RuntimeType::Php, RuntimeType::Mysql, RuntimeType::Node] {
                 if !site.metadata.requirements.iter().any(|k| k == kind.key())
                     && !site
@@ -426,7 +449,12 @@ impl Application {
                 "conflict"
             } else if site.metadata.error.is_some() {
                 "needs attention"
-            } else if site.required_kinds().iter().any(|kind| {
+            } else if site.web_server().is_none_or(|(provider, version)| {
+                !installed.iter().any(|runtime| {
+                    runtime.manifest.runtime.key() == provider
+                        && runtime.manifest.version == version
+                })
+            }) || site.required_kinds().iter().any(|kind| {
                 site.resolved.get(*kind).is_none_or(|version| {
                     !installed.iter().any(|r| {
                         r.manifest.runtime.key() == *kind && r.manifest.version == *version
@@ -482,11 +510,16 @@ impl Application {
             RuntimeType::Php,
             RuntimeType::Mysql,
             RuntimeType::Caddy,
+            RuntimeType::Apache,
+            RuntimeType::Nginx,
             RuntimeType::Node,
         ] {
             if let Some(r) = runtime::default_ref(&self.store, &kind)? {
                 defaults.insert(kind.key().into(), r.version);
             }
+        }
+        if let Some(value) = self.store.setting("default.web_server")? {
+            defaults.insert("web_server".into(), value);
         }
         let mut setup = crate::setup::state(&self.store, &self.home)?;
         setup.dns_server = self.dns_owned();
@@ -514,6 +547,8 @@ impl Application {
                 RuntimeType::Php,
                 RuntimeType::Mysql,
                 RuntimeType::Caddy,
+                RuntimeType::Apache,
+                RuntimeType::Nginx,
                 RuntimeType::Node,
             ]
             .into_iter()
@@ -545,6 +580,7 @@ impl Application {
                 })
                 .collect(),
             dependency_tasks: crate::tools::tasks::list_home(&self.home),
+            profiles: crate::profiles::list(&self.store)?,
         })
     }
     pub fn start_all(&mut self) -> Result<()> {
@@ -560,6 +596,34 @@ impl Application {
             .into_iter()
             .filter(|s| s.present && s.issue.is_none() && s.metadata.error.is_none())
             .collect::<Vec<_>>();
+        // The ingress is infrastructure, not a site Web Server selection. Resolve
+        // it before starting any site-owned process so a missing ingress cannot
+        // leave a partially-started Apache/Nginx/Caddy backend behind.
+        let mut needs_ingress = false;
+        for site in &sites {
+            if self
+                .store
+                .setting(&format!("site.{}.disabled", site.id))?
+                .as_deref()
+                != Some("true")
+                && (site.metadata.runtimes.contains_key("web_server")
+                    || site.metadata.framework == "static")
+            {
+                needs_ingress = true;
+                break;
+            }
+        }
+        let ingress = if !needs_ingress || self.ca_blocked {
+            None
+        } else {
+            let reference =
+                runtime::default_ref(&self.store, &RuntimeType::Caddy)?.ok_or_else(|| {
+                    crate::core::Error::Message(
+                        "Install Caddy for the DEVONE ingress before starting sites".into(),
+                    )
+                })?;
+            Some(runtime::find(&self.store, &reference)?)
+        };
         let mut wanted = BTreeSet::new();
         let mut routes = Vec::new();
         let mut errors = Vec::new();
@@ -617,7 +681,7 @@ impl Application {
                     }
                 }
                 use crate::projects::metadata::RouteStrategy;
-                let port = match site.metadata.route {
+                let upstream = match site.metadata.route {
                     RouteStrategy::Static => 0,
                     RouteStrategy::PhpFastcgi => self.store.conn.query_row(
                         "SELECT port FROM port_allocations WHERE owner=?1",
@@ -647,7 +711,17 @@ impl Application {
                         )?
                     }
                 };
-                routes.push((self.site(&site.id)?, port));
+                let current = self.site(&site.id)?;
+                let backend = crate::webserver::reconcile_site_backend(
+                    &self.store,
+                    &self.home,
+                    &mut self.supervisor,
+                    &current,
+                    upstream,
+                )?
+                .ok_or_else(|| crate::core::Error::Message("Web Server backend did not expose a loopback port".into()))?;
+                wanted.insert(format!("web:{}", site.id));
+                routes.push((current, backend));
                 Ok(())
             })();
             if let Err(e) = result {
@@ -658,13 +732,7 @@ impl Application {
         self.issues
             .extend(errors.into_iter().map(|s| format!("Project: {s}")));
         if !routes.is_empty() && !self.ca_blocked {
-            let reference =
-                runtime::default_ref(&self.store, &RuntimeType::Caddy)?.ok_or_else(|| {
-                    crate::core::Error::Message(
-                        "Import Caddy and set it as default to serve sites".into(),
-                    )
-                })?;
-            let runtime = runtime::find(&self.store, &reference)?;
+            let runtime = ingress.as_ref().expect("ingress was preflighted");
             for state in self.supervisor.states(&self.store)? {
                 if state.key.starts_with("caddy:") && state.key != runtime.id {
                     self.supervisor.stop(&self.store, &state.key)?;
@@ -676,7 +744,7 @@ impl Application {
                 &self.store,
                 &self.home,
                 &mut self.supervisor,
-                &runtime,
+                runtime,
                 &routes,
             )?;
             self.routed = routes
@@ -907,6 +975,8 @@ impl Application {
             for p in &site.processes {
                 self.supervisor.stop(&self.store, &p.key)?;
             }
+            self.supervisor
+                .stop(&self.store, &format!("web:{}", site.id))?;
         }
         self.store.set_setting(
             &format!("site.{id}.disabled"),
@@ -1025,21 +1095,10 @@ impl Application {
             {
                 continue;
             }
-            let port = match site.metadata.route {
-                crate::projects::metadata::RouteStrategy::Static => Some(0),
-                crate::projects::metadata::RouteStrategy::PhpFastcgi => {
-                    site.resolved.get("php").and_then(|v| {
-                        services
-                            .iter()
-                            .find(|s| s.key == format!("php:{v}") && s.healthy)
-                            .and_then(|s| s.port)
-                    })
-                }
-                crate::projects::metadata::RouteStrategy::NodeProxy => services
-                    .iter()
-                    .find(|s| s.key == format!("site:{}:web", site.id) && s.healthy)
-                    .and_then(|s| s.port),
-            };
+            let port = services
+                .iter()
+                .find(|service| service.key == format!("web:{}", site.id) && service.healthy)
+                .and_then(|service| service.port);
             if let Some(port) = port {
                 routes.push((site, port));
             }
@@ -1163,6 +1222,15 @@ impl Application {
     }
     pub fn set_default(&mut self, reference: RuntimeRef) -> Result<()> {
         runtime::set_default(&self.store, &reference)?;
+        if matches!(
+            &reference.kind,
+            RuntimeType::Caddy | RuntimeType::Apache | RuntimeType::Nginx
+        ) {
+            self.store.set_setting(
+                "default.web_server",
+                &format!("{}:{}", reference.kind.key(), reference.version),
+            )?;
+        }
         if self.active {
             self.start_required()?;
         }
@@ -1180,10 +1248,44 @@ impl Application {
         }
         Ok(())
     }
+    pub fn apply_profile(&mut self, site_id: &str, profile_id: &str) -> Result<()> {
+        crate::profiles::apply(&self.store, site_id, profile_id)?;
+        if self.active {
+            self.start_required()?;
+        }
+        Ok(())
+    }
+    pub fn set_web_server(&mut self, site_id: &str, binding: &str) -> Result<()> {
+        let (provider, version) = binding
+            .split_once(':')
+            .ok_or_else(|| crate::core::Error::Message("Choose an exact Web Server version".into()))?;
+        if !["caddy", "apache", "nginx"].contains(&provider) || version.is_empty() {
+            return fail("Unsupported Web Server binding");
+        }
+        self.site(site_id)?;
+        self.store.conn.execute(
+            "INSERT INTO site_runtime_overrides(site_id,kind,version) VALUES(?1,'web_server',?2) ON CONFLICT(site_id,kind) DO UPDATE SET version=excluded.version",
+            rusqlite::params![site_id, binding],
+        )?;
+        if self.active {
+            self.start_required()?;
+        }
+        Ok(())
+    }
     pub fn import(&mut self, manifest: RuntimeManifest, source: &Path) -> Result<Installation> {
         let item = runtime::import(&self.store, &self.home, manifest, source)?;
         if runtime::default_ref(&self.store, &item.manifest.runtime)?.is_none() {
             runtime::set_default(&self.store, &item.reference())?;
+        }
+        if matches!(
+            &item.manifest.runtime,
+            RuntimeType::Caddy | RuntimeType::Apache | RuntimeType::Nginx
+        ) && self.store.setting("default.web_server")?.is_none()
+        {
+            self.store.set_setting(
+                "default.web_server",
+                &format!("{}:{}", item.manifest.runtime.key(), item.manifest.version),
+            )?;
         }
         Ok(item)
     }
@@ -1191,6 +1293,16 @@ impl Application {
         let item = runtime::install(&self.store, &self.home, &reference)?;
         if runtime::default_ref(&self.store, &item.manifest.runtime)?.is_none() {
             runtime::set_default(&self.store, &item.reference())?;
+        }
+        if matches!(
+            &item.manifest.runtime,
+            RuntimeType::Caddy | RuntimeType::Apache | RuntimeType::Nginx
+        ) && self.store.setting("default.web_server")?.is_none()
+        {
+            self.store.set_setting(
+                "default.web_server",
+                &format!("{}:{}", item.manifest.runtime.key(), item.manifest.version),
+            )?;
         }
         Ok(item)
     }
