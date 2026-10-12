@@ -189,6 +189,11 @@ pub enum Action {
         site_id: String,
         binding: String,
     },
+    SetToolOverride {
+        site_id: String,
+        tool_id: String,
+        version: Option<String>,
+    },
 }
 #[derive(Serialize)]
 pub struct Response {
@@ -230,6 +235,18 @@ fn apply(app: &mut Application, action: Action) -> Result<Response> {
                 credential: None,
             });
         }
+        Action::SetToolOverride {
+            site_id,
+            tool_id,
+            version,
+        } => {
+            app.set_tool_override(&site_id, &tool_id, version.as_deref())?;
+            return Ok(Response {
+                snapshot: app.snapshot()?,
+                message: Some(format!("Updated this site's {tool_id} binding")),
+                credential: None,
+            });
+        }
         action => action,
     };
     let mut message = None;
@@ -238,7 +255,10 @@ fn apply(app: &mut Application, action: Action) -> Result<Response> {
         Action::SaveProfile { .. }
         | Action::DeleteProfile { .. }
         | Action::ApplyProfile { .. }
-        | Action::SetWebServer { .. } => unreachable!("profile actions are handled before dispatch"),
+        | Action::SetWebServer { .. }
+        | Action::SetToolOverride { .. } => {
+            unreachable!("profile and site environment actions are handled before dispatch")
+        }
         Action::CreateProject { request } => {
             if let Some(profile_id) = request.profile_id.as_deref()
                 && !crate::profiles::list(&app.store)?

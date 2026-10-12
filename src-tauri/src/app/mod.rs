@@ -13,6 +13,7 @@ use crate::{
     storage::Store,
     tls::TlsProvider,
 };
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -234,6 +235,10 @@ impl Application {
                     .map(|id| ("__profile".into(), id))
                     .into_iter()
                     .collect(),
+                tool_overrides: BTreeMap::new(),
+                resolved_tools: BTreeMap::new(),
+                tool_sources: BTreeMap::new(),
+                last_applied_profile_id: r.get(11)?,
                 status: "stopped".into(),
                 https: "unavailable".into(),
                 metadata: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or_default(),
@@ -251,6 +256,36 @@ impl Application {
                 .query_map([&site.id], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<std::result::Result<BTreeMap<_, _>, _>>()?;
             site.local_overrides = site.overrides.clone();
+            let mut tool_stmt = self
+                .store
+                .conn
+                .prepare("SELECT tool_id,version FROM site_tool_overrides WHERE site_id=?1")?;
+            site.tool_overrides = tool_stmt
+                .query_map([&site.id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<BTreeMap<_, _>, _>>()?;
+            for (tool, version) in &site.tool_overrides {
+                site.resolved_tools.insert(tool.clone(), version.clone());
+                site.tool_sources.insert(tool.clone(), "Local override".into());
+            }
+            if site.metadata.package_manager.as_deref() == Some("pnpm")
+                && let Some(version) = &site.metadata.package_manager_version
+            {
+                site.resolved_tools
+                    .entry("pnpm".into())
+                    .or_insert_with(|| version.clone());
+                site.tool_sources
+                    .entry("pnpm".into())
+                    .or_insert(".devone.json / packageManager".into());
+            }
+            for tool in ["composer", "pnpm"] {
+                if !site.resolved_tools.contains_key(tool)
+                    && let Some(version) =
+                        self.store.setting(&format!("default.tool.{tool}"))?
+                {
+                    site.resolved_tools.insert(tool.into(), version);
+                    site.tool_sources.insert(tool.into(), "Global default".into());
+                }
+            }
             for k in site.overrides.keys() {
                 site.runtime_sources
                     .insert(k.clone(), "Local override".into());
@@ -287,9 +322,7 @@ impl Application {
                         .iter()
                         .any(|p| p.definition.runtime == kind.key())
                     && !site.metadata.runtimes.contains_key(kind.key())
-                    && !(kind == RuntimeType::Mysql
-                        && site.metadata.route
-                            == crate::projects::metadata::RouteStrategy::PhpFastcgi)
+                    && !site.overrides.contains_key(kind.key())
                 {
                     continue;
                 }
@@ -1242,9 +1275,51 @@ impl Application {
         kind: RuntimeType,
         version: Option<&str>,
     ) -> Result<()> {
+        if kind == RuntimeType::Mysql
+            && let Some(bound_runtime) = self
+                .store
+                .conn
+                .query_row(
+                    "SELECT runtime_id FROM project_databases WHERE site_id=?1",
+                    [id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+            && version.is_some_and(|selected| bound_runtime != format!("mysql:{selected}"))
+        {
+            return fail(
+                "This project's database is bound to another exact MySQL runtime. Automatic database migration is not supported.",
+            );
+        }
         runtime::override_site(&self.store, id, &kind, version)?;
         if self.active {
             self.start_required()?;
+        }
+        Ok(())
+    }
+    pub fn set_tool_override(
+        &mut self,
+        site_id: &str,
+        tool_id: &str,
+        version: Option<&str>,
+    ) -> Result<()> {
+        self.site(site_id)?;
+        if !["composer", "pnpm"].contains(&tool_id) {
+            return fail("Unsupported site tool binding");
+        }
+        if let Some(version) = version {
+            if !crate::catalog::safe_segment(version) {
+                return fail("Invalid site tool version");
+            }
+            self.store.conn.execute(
+                "INSERT INTO site_tool_overrides(site_id,tool_id,version) VALUES(?1,?2,?3) ON CONFLICT(site_id,tool_id) DO UPDATE SET version=excluded.version",
+                rusqlite::params![site_id, tool_id, version],
+            )?;
+        } else {
+            self.store.conn.execute(
+                "DELETE FROM site_tool_overrides WHERE site_id=?1 AND tool_id=?2",
+                rusqlite::params![site_id, tool_id],
+            )?;
         }
         Ok(())
     }

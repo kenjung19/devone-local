@@ -168,8 +168,19 @@ export function SitesOverview({
                           (b) => b.site_id === site.id,
                         ),
                     )
-                    .map(([kind, version]) => `${runtimeName(kind)} ${version}`)
-                    .join(" / ") || "No project runtime required"}
+                    .map(([kind, version]) => {
+                      if (kind !== "web_server")
+                        return `${runtimeName(kind)} ${version}`;
+                      const [provider, providerVersion] = version.split(":", 2);
+                      const name =
+                        provider === "nginx"
+                          ? "Nginx"
+                          : provider === "apache"
+                            ? "Apache"
+                            : "Caddy";
+                      return `${name} ${providerVersion}`;
+                    })
+                    .join(" · ") || "No project runtime required"}
                 </p>
                 {problems.map((p, i) => (
                   <div className="site-problem" key={i}>

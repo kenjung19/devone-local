@@ -1,6 +1,6 @@
 import { editorChoice, siteStatus, siteProblems } from "../presentation";
 import { ErrorNotice } from "./ErrorNotice";
-import { SiteEnvironment } from "./SiteEnvironment";
+import { SiteEnvironmentPanel } from "./SiteEnvironmentPanel";
 import { useState } from "react";
 import type { Site, Snapshot, Action, ProcessDefinition } from "../contracts";
 import { Provision } from "./Provision";
@@ -49,21 +49,16 @@ export function SiteDetail({
       kind in site.resolved ||
       site.metadata?.requirements.includes(kind) ||
       (!site.metadata &&
-        ["php", "plain_php", "laravel"].includes(site.project_type) &&
-        kind !== "node"),
+        ((kind === "php" &&
+          ["php", "plain_php", "laravel", "wordpress"].includes(
+            site.project_type,
+          )) ||
+          (kind === "mysql" &&
+            ["laravel", "wordpress"].includes(site.project_type)))),
   );
-  const missing = kinds.flatMap((kind) => {
-    const version = site.resolved[kind];
-    return version &&
-      !data.installed.some(
-        (r) => r.manifest.runtime === kind && r.manifest.version === version,
-      )
-      ? [{ kind, version }]
-      : [];
-  });
   return (
     <>
-      <SiteEnvironment site={site} data={data} busy={busy} act={act} />
+      <SiteEnvironmentPanel site={site} data={data} busy={busy} act={act} />
       <button className="back" onClick={back}>
         ← All sites
       </button>
@@ -151,40 +146,6 @@ export function SiteDetail({
             <pre>{`MAIL_MAILER=smtp\nMAIL_HOST=127.0.0.1\nMAIL_PORT=${data.developer.mail.smtp_port}`}</pre>
           </section>
         )}
-      {missing.map(({ kind, version }) => (
-        <div className="alert error" role="alert" key={kind}>
-          <strong>
-            {site.hostname} requires {kind.toUpperCase()} {version}
-          </strong>
-          <p>
-            {kind.toUpperCase()} {version} is not installed. This explicit
-            version is retained.
-          </p>
-          {data.available.some(
-            (m) =>
-              m.runtime === kind &&
-              m.version === version &&
-              m.platform === data.platform &&
-              m.download &&
-              m.sha256,
-          ) && (
-            <button
-              disabled={busy}
-              onClick={() =>
-                void act({ type: "install", runtime: { kind, version } })
-              }
-            >
-              Install {kind.toUpperCase()} {version}
-            </button>
-          )}
-          <button
-            disabled={busy}
-            onClick={() => document.getElementById(`runtime-${kind}`)?.focus()}
-          >
-            Change Runtime
-          </button>
-        </div>
-      ))}
       <ErrorNotice error={site.metadata?.error ?? ""} />
       {siteProblems(site, data)
         .filter((p) => !p.message.includes("not installed"))
@@ -215,58 +176,6 @@ export function SiteDetail({
           <dd>
             <code>{site.document_root}</code>
           </dd>
-          {kinds.map((kind) => (
-            <div className="dl-row" key={kind}>
-              <dt>{kind.toUpperCase()}</dt>
-              <dd>
-                <select
-                  aria-label={`${kind.toUpperCase()} version`}
-                  id={`runtime-${kind}`}
-                  disabled={busy}
-                  value={(site.local_overrides ?? site.overrides)[kind] ?? ""}
-                  onChange={(e) =>
-                    void act({
-                      type: "override",
-                      site_id: site.id,
-                      kind,
-                      version: e.target.value || null,
-                    })
-                  }
-                >
-                  <option value="">
-                    {site.metadata?.runtimes[kind]
-                      ? `Portable config (${site.metadata.runtimes[kind]})`
-                      : `Global default (${data.defaults[kind] ?? "not configured"})`}
-                  </option>
-                  {missing.some((m) => m.kind === kind) &&
-                    site.overrides[kind] && (
-                      <option value={site.overrides[kind]} disabled>
-                        {site.overrides[kind]} · Not installed
-                      </option>
-                    )}
-                  {data.installed
-                    .filter((r) => r.manifest.runtime === kind)
-                    .map((r) => (
-                      <option key={r.id} value={r.manifest.version}>
-                        {r.manifest.version}
-                      </option>
-                    ))}
-                </select>
-              </dd>
-            </div>
-          ))}
-          {kinds.map((kind) => (
-            <div className="dl-row" key={`effective-${kind}`}>
-              <dt>Effective {kind.toUpperCase()}</dt>
-              <dd>
-                {site.runtime_sources?.[kind] ??
-                  (site.overrides[kind]
-                    ? "Local override"
-                    : "Global default")}{" "}
-                · {site.resolved[kind] ?? "unconfigured"}
-              </dd>
-            </div>
-          ))}
           <dt>Local domains</dt>
           <dd>{data.dns_ready ? "Wildcard .test ready" : "Setup required"}</dd>
           <dt>HTTPS</dt>

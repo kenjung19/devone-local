@@ -23,6 +23,26 @@ export function NewProject({
   const [templateId, setTemplate] = useState("static");
   const [profileId, setProfileId] = useState("builtin-static");
   const [advanced, setAdvanced] = useState(false);
+  const webChoices = [
+    ...new Set([
+      ...data.installed
+        .filter((runtime) =>
+          ["caddy", "apache", "nginx"].includes(runtime.manifest.runtime),
+        )
+        .map(
+          (runtime) =>
+            `${runtime.manifest.runtime}:${runtime.manifest.version}`,
+        ),
+      ...data.available
+        .filter((runtime) =>
+          ["caddy", "apache", "nginx"].includes(runtime.runtime),
+        )
+        .map((runtime) => `${runtime.runtime}:${runtime.version}`),
+    ]),
+  ];
+  const [webServer, setWebServer] = useState(
+    data.defaults.web_server ?? webChoices[0] ?? "",
+  );
   const [runtimes, setRuntimes] = useState<Record<string, string>>(
     initialVersions(data),
   );
@@ -78,12 +98,51 @@ export function NewProject({
     (k) =>
       !(data.tools ?? []).some((t) => t.id === k && t.version === tools[k]),
   );
+  const webInstalled = data.installed.some(
+    (runtime) =>
+      `${runtime.manifest.runtime}:${runtime.manifest.version}` === webServer,
+  );
+  const applyProfileSelection = (id: string) => {
+    setProfileId(id);
+    const profile = data.profiles?.find((item) => item.id === id);
+    if (!profile) return;
+    const web = profile.bindings.web_server;
+    if (web) {
+      setWebServer(
+        web.version === "none"
+          ? ""
+          : web.version ?? data.defaults[web.provider] ?? "",
+      );
+    }
+    setRuntimes((current) => {
+      const next = { ...current };
+      for (const [kind, binding] of Object.entries(profile.bindings)) {
+        if (kind === "web_server") continue;
+        next[kind] =
+          binding.version === "none"
+            ? ""
+            : binding.version ?? data.defaults[binding.provider] ?? "";
+      }
+      return next;
+    });
+    setTools((current) => {
+      const next = { ...current };
+      for (const [tool, selected] of Object.entries(profile.tools)) {
+        next[tool] =
+          selected === "none"
+            ? ""
+            : selected ?? data.tool_defaults?.[tool] ?? "";
+      }
+      return next;
+    });
+  };
   const create = () => {
     if (!template) return;
     const request: CreateRequest = {
       name,
       template: template.id,
       profile_id: profileId || null,
+      web_server: webServer || null,
       runtimes: Object.fromEntries(kinds.map((k) => [k, runtimes[k] ?? ""])),
       tools: Object.fromEntries(managers.map((k) => [k, tools[k] ?? ""])),
       install_dependencies: install && kinds.includes("node"),
@@ -117,28 +176,56 @@ export function NewProject({
               maxLength={63}
             />
           </label>
+          <fieldset className="template-picker">
+            <legend>Choose a template</legend>
+            <div className="template-grid">
+              {data.developer?.templates.map((t) => (
+                <button
+                  type="button"
+                  key={t.id}
+                  aria-pressed={templateId === t.id}
+                  disabled={!!active || busy}
+                  onClick={() => {
+                    setTemplate(t.id);
+                    const selectedProfile =
+                      t.id === "laravel"
+                        ? "builtin-laravel"
+                        : t.id === "node"
+                          ? "builtin-node"
+                          : ["blank-php", "wordpress"].includes(t.id)
+                            ? "builtin-php"
+                            : "builtin-static";
+                    setInstall(false);
+                    setMail(false);
+                    setNode(false);
+                    setDatabase(false);
+                    setRuntimes(initialVersions(data, t));
+                    applyProfileSelection(selectedProfile);
+                  }}
+                >
+                  <strong>{t.name}</strong>
+                  <small>
+                    {t.custom
+                      ? "Custom code - review before use"
+                      : t.id === "wordpress"
+                        ? "Website with a database"
+                        : t.id === "static"
+                          ? "HTML, CSS and JavaScript"
+                          : t.id === "laravel"
+                            ? "PHP application"
+                            : t.id === "blank-php"
+                              ? "Simple PHP starter"
+                              : "JavaScript / TypeScript app"}
+                  </small>
+                </button>
+              ))}
+            </div>
+          </fieldset>
           <label>
             Environment Profile
             <select
               value={profileId}
-              onChange={(event) => {
-                const id = event.target.value;
-                setProfileId(id);
-                const profile = data.profiles?.find((item) => item.id === id);
-                if (!profile) return;
-                setRuntimes((current) => ({
-                  ...current,
-                  ...Object.fromEntries(
-                    Object.entries(profile.bindings)
-                      .filter(([, binding]) => binding.version !== "none")
-                      .filter(([kind]) => kind !== "web_server")
-                      .map(([kind, binding]) => [
-                        kind,
-                        binding.version ?? data.defaults[binding.provider] ?? "",
-                      ]),
-                  ),
-                }));
-              }}
+              onChange={(event) => applyProfileSelection(event.target.value)}
             >
               <option value="">No profile</option>
               {(data.profiles ?? []).map((profile) => (
@@ -155,6 +242,23 @@ export function NewProject({
             <p className="panel-copy">
               The profile supplies the initial environment. Open Advanced to customize individual runtimes.
             </p>
+          )}
+          {!advanced && !webInstalled && (
+            <div role="alert">
+              {webServer || "Web Server"} is not installed.{" "}
+              <button
+                disabled={busy || !webServer || !webChoices.includes(webServer)}
+                onClick={() => {
+                  const [kind, version] = webServer.split(":");
+                  void act({
+                    type: "install",
+                    runtime: { kind: kind as RuntimeKind, version },
+                  });
+                }}
+              >
+                Install selected Web Server
+              </button>
+            </div>
           )}
           {!advanced &&
             missing.map((kind) => (
@@ -191,51 +295,6 @@ export function NewProject({
                 install a version.
               </p>
             ))}
-          <fieldset className="template-picker">
-            <legend>Choose a template</legend>
-            <div className="template-grid">
-              {data.developer?.templates.map((t) => (
-                <button
-                  type="button"
-                  key={t.id}
-                  aria-pressed={templateId === t.id}
-                  disabled={!!active || busy}
-                  onClick={() => {
-                    setTemplate(t.id);
-                    setProfileId(
-                      t.id === "laravel"
-                        ? "builtin-laravel"
-                        : t.id === "node"
-                          ? "builtin-node"
-                          : ["blank-php", "wordpress"].includes(t.id)
-                            ? "builtin-php"
-                            : "builtin-static",
-                    );
-                    setInstall(false);
-                    setMail(false);
-                    setNode(false);
-                    setDatabase(false);
-                    setRuntimes(initialVersions(data, t));
-                  }}
-                >
-                  <strong>{t.name}</strong>
-                  <small>
-                    {t.custom
-                      ? "Custom code - review before use"
-                      : t.id === "wordpress"
-                        ? "Website with a database"
-                        : t.id === "static"
-                          ? "HTML, CSS and JavaScript"
-                          : t.id === "laravel"
-                            ? "PHP application"
-                            : t.id === "blank-php"
-                              ? "Simple PHP starter"
-                              : "JavaScript / TypeScript app"}
-                  </small>
-                </button>
-              ))}
-            </div>
-          </fieldset>
           {name && !valid && (
             <p role="alert">
               Use lowercase letters, digits and hyphens, without
@@ -244,6 +303,44 @@ export function NewProject({
           )}
           {advanced && (
             <>
+          <label>
+            Web Server
+            <select
+              value={webServer}
+              onChange={(event) => setWebServer(event.target.value)}
+            >
+              <option value="">Select a Web Server</option>
+              {webChoices.map((binding) => (
+                <option key={binding} value={binding}>
+                  {binding.replace(":", " ")}
+                  {data.installed.some(
+                    (runtime) =>
+                      `${runtime.manifest.runtime}:${runtime.manifest.version}` ===
+                      binding,
+                  )
+                    ? ""
+                    : " · Not installed"}
+                </option>
+              ))}
+            </select>
+          </label>
+          {!webInstalled && (
+            <div role="alert">
+              {webServer || "Web Server"} is not installed.{" "}
+              <button
+                disabled={busy || !webServer || !webChoices.includes(webServer)}
+                onClick={() => {
+                  const [kind, version] = webServer.split(":");
+                  void act({
+                    type: "install",
+                    runtime: { kind: kind as RuntimeKind, version },
+                  });
+                }}
+              >
+                Install selected Web Server
+              </button>
+            </div>
+          )}
           {templateId === "laravel" && (
             <label>
               <input
@@ -432,6 +529,7 @@ export function NewProject({
               active ||
               !valid ||
               !template ||
+              !webInstalled ||
               missing.length > 0 ||
               missingTools.length > 0
             }

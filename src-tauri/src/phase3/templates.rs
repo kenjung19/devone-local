@@ -51,6 +51,8 @@ pub struct Request {
     #[serde(default)]
     pub profile_id: Option<String>,
     #[serde(default)]
+    pub web_server: Option<String>,
+    #[serde(default)]
     pub runtimes: BTreeMap<String, String>,
     #[serde(default)]
     pub tools: BTreeMap<String, String>,
@@ -254,6 +256,27 @@ pub fn validate_name(store: &Store, home: &Home, name: &str) -> Result<PathBuf> 
 }
 pub fn validate_request(store: &Store, home: &Home, r: &Request, t: &Template) -> Result<()> {
     validate_name(store, home, &r.name)?;
+    if let Some(binding) = r.web_server.as_deref() {
+        let (provider, selected_version) = binding.split_once(':').ok_or_else(|| {
+            crate::core::Error::Message("Choose an exact Web Server version".into())
+        })?;
+        let kind = match provider {
+            "caddy" => RuntimeType::Caddy,
+            "apache" => RuntimeType::Apache,
+            "nginx" => RuntimeType::Nginx,
+            _ => return fail("Unsupported Web Server binding"),
+        };
+        let selected = runtime::find(
+            store,
+            &RuntimeRef {
+                kind,
+                version: selected_version.into(),
+            },
+        )?;
+        if !selected.binary(home, "server")?.is_file() {
+            return fail("Selected Web Server files are missing");
+        }
+    }
     let allowed = if t.id == "laravel" {
         vec!["php", "node", "mysql"]
     } else if t.id == "blank-php" {
@@ -559,6 +582,10 @@ fn site(r: &Request, path: &Path) -> Site {
         local_overrides: BTreeMap::new(),
         resolved: r.runtimes.clone(),
         runtime_sources: BTreeMap::new(),
+        tool_overrides: BTreeMap::new(),
+        resolved_tools: r.tools.clone(),
+        tool_sources: BTreeMap::new(),
+        last_applied_profile_id: r.profile_id.clone(),
         status: "stopped".into(),
         https: "unavailable".into(),
         metadata,
@@ -929,6 +956,18 @@ fn create(
                     rusqlite::params![site_id, kind, version],
                 )?;
             }
+        }
+        for (tool_id, version) in &r.tools {
+            store.conn.execute(
+                "INSERT INTO site_tool_overrides(site_id,tool_id,version) VALUES(?1,?2,?3) ON CONFLICT(site_id,tool_id) DO UPDATE SET version=excluded.version",
+                rusqlite::params![site_id, tool_id, version],
+            )?;
+        }
+        if let Some(web_server) = r.web_server.as_deref() {
+            store.conn.execute(
+                "INSERT INTO site_runtime_overrides(site_id,kind,version) VALUES(?1,'web_server',?2) ON CONFLICT(site_id,kind) DO UPDATE SET version=excluded.version",
+                rusqlite::params![site_id, web_server],
+            )?;
         }
         {
             let mut all = jobs().lock().unwrap_or_else(|e| e.into_inner());

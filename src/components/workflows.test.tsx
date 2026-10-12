@@ -187,11 +187,10 @@ describe("desktop setup and configuration presentation", () => {
         logs={() => {}}
       />,
     );
-    expect(html).toContain("requires PHP 7.3.33");
-    expect(html).toContain("Install PHP 7.3.33");
+    expect(html).toContain("php 7.3.33 is not installed");
+    expect(html).toContain("Install");
     expect(html).toContain('value="7.3.33"');
     expect(html).toContain("Not installed");
-    expect(html).toContain("Change Runtime");
   });
   it("prefills saved PHP directives and exposes only discovered extension files", () => {
     const html = renderToStaticMarkup(
@@ -222,10 +221,11 @@ describe("desktop setup and configuration presentation", () => {
       />,
     );
     expect(html).toContain('value="8.5.1"');
-    expect(html).not.toContain('value="8.6.0"');
-    expect(html).toContain("Global default");
+    expect(html).toContain('value="8.6.0"');
+    expect(html).toContain("8.6.0 · Not installed");
+    expect(html).toContain("Detected/default");
     expect(html).toContain("Logs");
-    expect(html).toContain("Project database");
+    expect(html).not.toContain("Project database");
   });
 });
 
@@ -277,9 +277,9 @@ describe("Phase 2 site controls", () => {
         logs={() => {}}
       />,
     );
-    expect(html).toContain("runtime-node");
-    expect(html).not.toContain("runtime-php");
-    expect(html).not.toContain("runtime-mysql");
+    expect(html).toContain('aria-label="Node.js version"');
+    expect(html).not.toContain('aria-label="PHP version"');
+    expect(html).not.toContain('aria-label="MySQL version"');
     expect(html).not.toContain("Project database");
     expect(html).toContain("node_modules missing");
     expect(html).toContain("Install pnpm dependencies");
@@ -549,7 +549,7 @@ describe("daily Windows workflows", () => {
         create={() => {}}
       />,
     );
-    expect(html).toContain("PHP 8.5.1 / Node 24.21.0");
+    expect(html).toContain("PHP 8.5.1 · Node 24.21.0");
     expect(html).toContain("Open in VS Code");
     expect(html).toContain("Terminal");
     expect(html).not.toContain("MySQL 8");

@@ -18,6 +18,14 @@ pub struct Site {
     pub resolved: BTreeMap<String, String>,
     #[serde(default)]
     pub runtime_sources: BTreeMap<String, String>,
+    #[serde(default)]
+    pub tool_overrides: BTreeMap<String, String>,
+    #[serde(default)]
+    pub resolved_tools: BTreeMap<String, String>,
+    #[serde(default)]
+    pub tool_sources: BTreeMap<String, String>,
+    #[serde(default)]
+    pub last_applied_profile_id: Option<String>,
     pub status: String,
     pub https: String,
     #[serde(default)]

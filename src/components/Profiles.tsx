@@ -23,12 +23,16 @@ const emptyProfile = (): EnvironmentProfile => ({
 });
 
 function summary(profile: EnvironmentProfile) {
-  return Object.entries(profile.bindings)
-    .map(([kind, value]) =>
+  return [
+    ...Object.entries(profile.bindings).map(([kind, value]) =>
       kind === "web_server"
         ? `${value.provider} ${value.version ?? "default"}`
         : `${kind} ${value.version === "none" ? "None" : value.version ?? "default"}`,
-    )
+    ),
+      ...Object.entries(profile.tools).map(([tool, version]) =>
+        `${tool} ${version === "none" ? "None" : version ?? "default"}`,
+      ),
+  ]
     .join(" / ");
 }
 
@@ -56,6 +60,13 @@ export function Profiles({
         .map((item) => item.version),
     ),
   ];
+  const toolVersions = (tool: string) => [
+    ...new Set(
+      [...(data.tools ?? []), ...(data.available_tools ?? [])]
+        .filter((item) => item.id === tool)
+        .map((item) => item.version),
+    ),
+  ];
   return (
     <>
       <section className="panel">
@@ -76,17 +87,24 @@ export function Profiles({
               <small>{summary(profile)}</small>
             </div>
             <div className="actions">
+              {!profile.built_in && (
+                <button onClick={() => setEditing(structuredClone(profile))}>
+                  Edit
+                </button>
+              )}
               <button
                 onClick={() =>
                   setEditing({
                     ...structuredClone(profile),
-                    id: profile.built_in ? "" : profile.id,
-                    name: profile.built_in ? `${profile.name} Copy` : profile.name,
+                    id: "",
+                    name: `${profile.name} Copy`,
                     built_in: false,
+                    created_at: 0,
+                    updated_at: 0,
                   })
                 }
               >
-                {profile.built_in ? "Duplicate" : "Edit"}
+                Duplicate
               </button>
               {!profile.built_in && (
                 <button
@@ -158,6 +176,31 @@ export function Profiles({
                   <option value="none">None</option>
                   <option value="">Use global default</option>
                   {versions(kind).map((version) => (
+                    <option key={version}>{version}</option>
+                  ))}
+                </select>
+              </label>
+            ))}
+            {(["composer", "pnpm"] as const).map((tool) => (
+              <label key={tool}>
+                {tool === "composer" ? "Composer" : "pnpm"}
+                <select
+                  value={
+                    Object.prototype.hasOwnProperty.call(editing.tools, tool)
+                      ? editing.tools[tool] ?? ""
+                      : "unchanged"
+                  }
+                  onChange={(event) => {
+                    const tools = { ...editing.tools };
+                    if (event.target.value === "unchanged") delete tools[tool];
+                    else tools[tool] = event.target.value || null;
+                    setEditing({ ...editing, tools });
+                  }}
+                >
+                  <option value="unchanged">Leave unchanged</option>
+                  <option value="none">None</option>
+                  <option value="">Use global default</option>
+                  {toolVersions(tool).map((version) => (
                     <option key={version}>{version}</option>
                   ))}
                 </select>

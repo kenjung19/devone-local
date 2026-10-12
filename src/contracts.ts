@@ -51,6 +51,9 @@ export interface Site {
   local_overrides?: Record<string, string>;
   resolved: Record<string, string>;
   runtime_sources?: Record<string, string>;
+  tool_overrides?: Record<string, string>;
+  resolved_tools?: Record<string, string>;
+  tool_sources?: Record<string, string>;
   status: string;
   https: string;
   discovered_at: number;
@@ -255,7 +258,13 @@ export type Action =
   | { type: "save_profile"; profile: EnvironmentProfile }
   | { type: "delete_profile"; profile_id: string }
   | { type: "apply_profile"; site_id: string; profile_id: string }
-  | { type: "set_web_server"; site_id: string; binding: string };
+  | { type: "set_web_server"; site_id: string; binding: string }
+  | {
+      type: "set_tool_override";
+      site_id: string;
+      tool_id: "composer" | "pnpm";
+      version: string | null;
+    };
 export interface Response {
   snapshot: Snapshot;
   message: string | null;
@@ -330,6 +339,7 @@ export interface CreateRequest {
   name: string;
   template: string;
   profile_id: string | null;
+  web_server: string | null;
   runtimes: Record<string, string>;
   tools: Record<string, string>;
   install_dependencies: boolean;

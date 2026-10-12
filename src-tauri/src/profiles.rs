@@ -45,6 +45,15 @@ impl EnvironmentProfile {
                 return fail("Profile contains an invalid runtime binding");
             }
         }
+        for (tool, version) in &self.tools {
+            if !["composer", "pnpm"].contains(&tool.as_str())
+                || version
+                    .as_deref()
+                    .is_some_and(|value| !crate::catalog::safe_segment(value))
+            {
+                return fail("Profile contains an invalid tool binding");
+            }
+        }
         Ok(())
     }
 }
@@ -198,6 +207,11 @@ pub fn apply(store: &Store, site_id: &str, profile_id: &str) -> Result<()> {
                     "INSERT INTO site_runtime_overrides(site_id,kind,version) VALUES(?1,'web_server',?2) ON CONFLICT(site_id,kind) DO UPDATE SET version=excluded.version",
                     rusqlite::params![site_id, value],
                 )?;
+            } else {
+                tx.execute(
+                    "DELETE FROM site_runtime_overrides WHERE site_id=?1 AND kind='web_server'",
+                    [site_id],
+                )?;
             }
         } else if let Some(version) = version {
             if kind == "mysql"
@@ -224,7 +238,9 @@ pub fn apply(store: &Store, site_id: &str, profile_id: &str) -> Result<()> {
         }
     }
     for (tool_id, version) in &profile.tools {
-        let resolved = if let Some(version) = version {
+        let resolved = if version.as_deref() == Some("none") {
+            None
+        } else if let Some(version) = version {
             Some(version.clone())
         } else {
             store.setting(&format!("default.tool.{tool_id}"))?
@@ -307,5 +323,63 @@ mod tests {
         let store = Store::open(&dir.path().join("state.db")).unwrap();
         assert!(delete(&store, "builtin-laravel").is_err());
         assert!(built_ins().iter().all(|profile| profile.built_in));
+    }
+    #[test]
+    fn reapply_updates_site_copy_and_explicit_none_removes_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state.db")).unwrap();
+        site(&store, "reapply");
+        store.set_setting("default.tool.composer", "2.8.7").unwrap();
+        let mut profile = save(&store, EnvironmentProfile {
+            id: String::new(), name: "Tools".into(), description: String::new(),
+            bindings: BTreeMap::from([("php".into(), Binding { provider: "php".into(), version: Some("8.4.0".into()) })]),
+            tools: BTreeMap::from([("composer".into(), None)]), built_in: false, created_at: 0, updated_at: 0,
+        }).unwrap();
+        apply(&store, "reapply", &profile.id).unwrap();
+        let tool = || store.conn.query_row(
+            "SELECT version FROM site_tool_overrides WHERE site_id='reapply' AND tool_id='composer'",
+            [], |row| row.get::<_, String>(0),
+        ).optional().unwrap();
+        assert_eq!(tool().as_deref(), Some("2.8.7"));
+        profile.bindings.get_mut("php").unwrap().version = Some("8.5.0".into());
+        profile.tools.insert("composer".into(), Some("none".into()));
+        profile = save(&store, profile).unwrap();
+        apply(&store, "reapply", &profile.id).unwrap();
+        assert_eq!(tool(), None);
+        let php: String = store.conn.query_row(
+            "SELECT version FROM site_runtime_overrides WHERE site_id='reapply' AND kind='php'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(php, "8.5.0");
+    }
+    #[test]
+    fn unsupported_profile_tool_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state.db")).unwrap();
+        let profile = EnvironmentProfile {
+            id: String::new(), name: "Bad".into(), description: String::new(),
+            bindings: BTreeMap::new(), tools: BTreeMap::from([("npm".into(), None)]),
+            built_in: false, created_at: 0, updated_at: 0,
+        };
+        assert!(save(&store, profile).is_err());
+    }
+    #[test]
+    fn apply_refuses_to_rebind_a_provisioned_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state.db")).unwrap();
+        site(&store, "database-bound");
+        store.conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+        store.conn.execute(
+            "INSERT INTO project_databases(site_id,runtime_id,database_name,username,credential_ref,status,created_at) VALUES(?1,'mysql:9.7.2','demo','demo','credential','ready',0)",
+            ["database-bound"],
+        ).unwrap();
+        store.conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        let profile = save(&store, EnvironmentProfile {
+            id: String::new(), name: "Other MySQL".into(), description: String::new(),
+            bindings: BTreeMap::from([("mysql".into(), Binding { provider: "mysql".into(), version: Some("9.6.0".into()) })]),
+            tools: BTreeMap::new(), built_in: false, created_at: 0, updated_at: 0,
+        }).unwrap();
+        let error = apply(&store, "database-bound", &profile.id).unwrap_err().to_string();
+        assert!(error.contains("migration is not supported"));
     }
 }
