@@ -107,7 +107,7 @@ const developer: NonNullable<Snapshot["developer"]> = {
 
 const act = async () => true;
 describe("desktop setup and configuration presentation", () => {
-  it("offers MySQL initialization before backend readiness and hides it after initialization", () => {
+  it("explains automatic MySQL data creation instead of a separate initialize step", () => {
     const mysql: Installation = {
       ...php,
       id: "mysql:9.7.2",
@@ -122,13 +122,14 @@ describe("desktop setup and configuration presentation", () => {
     const render = (value: Snapshot) => renderToStaticMarkup(
       <SetupRuntime data={value} kind="mysql" busy={false} act={act} importRuntime={() => {}} />,
     );
-    expect(render(snapshot)).toContain("Initialize MySQL instance");
+    expect(render(snapshot)).not.toContain("Initialize MySQL instance");
+    expect(render(snapshot)).toContain("สร้างโฟลเดอร์ข้อมูลให้อัตโนมัติ");
     expect(render(snapshot)).toContain("ติดตั้ง MySQL แล้ว");
-    expect(render({ ...snapshot, installed: [] })).not.toContain("Initialize MySQL instance");
+    expect(render({ ...snapshot, installed: [] })).not.toContain("สร้างโฟลเดอร์ข้อมูลให้อัตโนมัติ");
     expect(render({
       ...snapshot,
       databases: [{ runtime_id: "mysql:9.7.2", data_path: "database/mysql", initialized: true, port: null }],
-    })).not.toContain("Initialize MySQL instance");
+    })).not.toContain("สร้างโฟลเดอร์ข้อมูลให้อัตโนมัติ");
   });
   it("offers an explicit non-modal CA upgrade only for legacy/pending installs", () => {
     const legacy = { ...data, setup: { ...data.setup, caddy: true, ca_present: true, ca_trusted: true, ca_upgrade_pending: true } };

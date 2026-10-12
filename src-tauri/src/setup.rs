@@ -54,16 +54,9 @@ pub fn state(store: &Store, home: &Home) -> Result<State> {
         ca_recovery_needed: crate::tls::recovery_needed(store, home)?,
         caddy: has(RuntimeType::Caddy),
         php: has(RuntimeType::Php),
-        mysql: has(RuntimeType::Mysql)
-            && store.setting("default.mysql")?.is_some_and(|version| {
-                crate::database::instances(store).is_ok_and(|instances| {
-                    instances.iter().any(|instance| {
-                        instance.runtime_id == format!("mysql:{version}")
-                            && instance.initialized
-                            && home.path(&instance.data_path).is_dir()
-                    })
-                })
-            }),
+        // Ready once a default MySQL is installed: the first start creates
+        // its data folder, so Setup has no separate initialization step.
+        mysql: has(RuntimeType::Mysql) && store.setting("default.mysql")?.is_some(),
     })
 }
 pub fn finish(store: &Store, home: &Home, skip: bool) -> Result<()> {

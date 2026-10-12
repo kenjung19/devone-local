@@ -114,7 +114,7 @@ export function DatabaseManager({
                 <strong>MySQL {r.manifest.version}</strong>
                 <p>
                   {!db?.initialized
-                    ? "Needs initialization"
+                    ? "Not created yet · Start creates its data folder"
                     : state?.healthy
                       ? "Running"
                       : "Stopped"}{" "}
@@ -124,13 +124,12 @@ export function DatabaseManager({
                 <small>
                   {db
                     ? `${data.home}/${db.data_path}`
-                    : "Data directory will be initialized explicitly"}
+                    : "The data folder is created on first start (up to a minute)"}
                 </small>
               </div>
               <div className="actions">
                 {(
                   [
-                    "initialize",
                     "start",
                     "stop",
                     "restart",
@@ -141,8 +140,8 @@ export function DatabaseManager({
                     key={operation}
                     disabled={
                       busy ||
-                      (operation === "initialize" && !!db?.initialized) ||
-                      (["start", "restart", "validate"].includes(operation) &&
+                      (operation === "start" && !!state?.healthy) ||
+                      (["restart", "validate"].includes(operation) &&
                         !db?.initialized) ||
                       (operation === "stop" && !state?.healthy)
                     }

@@ -110,20 +110,10 @@ export function SetupRuntime({
             (d) =>
               d.runtime_id === "mysql:" + data.defaults.mysql && d.initialized,
           ) && (
-            <div className="actions">
-              <button
-                disabled={busy}
-                onClick={() =>
-                  void act({
-                    type: "database",
-                    runtime: { kind: "mysql", version: data.defaults.mysql },
-                    operation: "initialize",
-                  })
-                }
-              >
-                Initialize MySQL instance
-              </button>
-            </div>
+            <p>
+              MySQL จะสร้างโฟลเดอร์ข้อมูลให้อัตโนมัติเมื่อเริ่มใช้งานครั้งแรก
+              (ครั้งแรกอาจใช้เวลาไม่เกินหนึ่งนาที)
+            </p>
           )}
       </div>
       <button disabled={busy} onClick={() => importRuntime(kind)}>

@@ -100,21 +100,8 @@ export function siteProblems(
             }
           : undefined,
       });
-    } else if (
-      kind === "mysql" &&
-      !data.databases.some(
-        (d) => d.runtime_id === `mysql:${version}` && d.initialized,
-      )
-    )
-      result.push({
-        message: `MySQL ${version} is not initialized`,
-        label: "Initialize",
-        action: {
-          type: "database",
-          runtime: { kind: "mysql", version },
-          operation: "initialize",
-        },
-      });
+    }
+    // MySQL needs no separate step: starting it creates its data folder.
   }
   for (const [needed, manager] of [
     [
