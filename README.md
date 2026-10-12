@@ -4,9 +4,14 @@ A Windows development environment for PHP, MySQL, Node.js and static projects. R
 
 ## Install
 
-Use the current-user Windows x64 installer. Developer builds put it at `release/DEVONE-Local-0.1.0-Windows-x64-Setup.exe` with checksum metadata in `release/release-artifacts.json`. Binary installers are build output and are not committed to Git. Version 0.1.0 acceptance results and authorization policy are recorded in [Windows authorization readiness](docs/windows-authorization-readiness.md). Optional machine certification uses the [CMD acceptance workflows](scripts/acceptance/README.md).
+DEVONE Local ships in exactly two Windows x64 formats. Both include one PHP stable, MySQL LTS, Caddy stable and Node.js LTS version, pinned in `scripts/windows-bundle.json` and already registered; more versions can be installed later. Projects, database data, credentials and CA private keys are never bundled. DEVONE Home is the folder that contains `devone-local.exe`, so it must be writable without administrator rights.
 
-The full installer and `release/DEVONE-Local-0.1.0-Windows-x64-Portable.zip` include one PHP stable, MySQL LTS, Caddy stable and Node.js LTS version, pinned in `scripts/windows-bundle.json`. Extract the portable `devone-local` folder into a writable location and run its executable. These runtimes are already registered; additional versions can be installed later. Projects, database data, credentials and CA private keys are not bundled.
+| Format | File | Install | Remove |
+| --- | --- | --- | --- |
+| Installer | `DEVONE-Local-0.1.0-Windows-x64-Setup.exe` | Run it and choose the install folder (current user, no admin; Program Files and Windows folders are refused). | Settings → Apps, or Control Panel → Programs. Removes the program, shortcuts and bundled runtimes; keeps `www`, `database`, `backups`, `certs`, `config` and `devone.db`. Delete the folder yourself to erase that data. |
+| Portable | `DEVONE-Local-0.1.0-Windows-x64-Portable.zip` | Extract the `devone-local` folder anywhere writable (for example `D:\`) and run `devone-local.exe`. | Quit DEVONE, then delete the folder. Turn off startup, local DNS and HTTPS trust in Settings first if you enabled them. |
+
+`pnpm release:windows` writes only these two files plus `release/release-artifacts.json` (size and SHA-256 for each) to `release/`. Build output is not committed to Git. Do not run an executable from inside `release/`: it would create a Home there. Version 0.1.0 acceptance results and authorization policy are recorded in [Windows authorization readiness](docs/windows-authorization-readiness.md). Optional machine certification uses the [CMD acceptance workflows](scripts/acceptance/README.md).
 
 ## First run
 

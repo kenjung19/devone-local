@@ -20,6 +20,46 @@ def sha256(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
+HOME_DIRECTORIES = ['www', 'runtimes', 'tools', 'database', 'config', 'certs', 'logs', 'backups', 'cache']
+# Files this script has ever written to release/. Only these are replaced;
+# anything else (for example a Home created by running an EXE there) is
+# reported, never deleted.
+GENERATED = re.compile(
+    r'^(DEVONE-Local-[0-9.]+-Windows-x64-(Setup\.exe|Portable\.zip)'
+    r'|release-artifacts\.json|bundled-artifacts\.json|devone-local\.exe)$')
+
+
+def release_names(version):
+    return {
+        'installer': f'DEVONE-Local-{version}-Windows-x64-Setup.exe',
+        'portable': f'DEVONE-Local-{version}-Windows-x64-Portable.zip',
+    }
+
+
+def prepare_release_directory(release):
+    if release.is_symlink():
+        raise ValueError('release/ must not be a link')
+    release.mkdir(parents=True, exist_ok=True)
+    for item in release.iterdir():
+        if GENERATED.match(item.name):
+            if item.is_symlink() or not item.is_file():
+                raise ValueError(f'Generated release path must be a regular file: {item}')
+            item.unlink()
+
+
+def publish(release, staging, artifacts):
+    """Replace generated outputs only after every artifact was built."""
+    prepare_release_directory(release)
+    for artifact in artifacts:
+        (staging / artifact['filename']).replace(release / artifact['filename'])
+    (release / 'release-artifacts.json').write_text(json.dumps(artifacts, indent=2)+'\n', encoding='utf-8')
+    expected = {a['filename'] for a in artifacts} | {'release-artifacts.json'}
+    foreign = sorted(i.name for i in release.iterdir() if i.name not in expected and i != staging)
+    if foreign:
+        print('WARNING: release/ contains entries that are not part of this release '
+              f'(left untouched): {", ".join(foreign)}', flush=True)
+
+
 def runtime_inputs(root):
     document = json.loads((root / 'scripts/windows-bundle.json').read_text(encoding='utf-8'))
     cache = Path(tempfile.gettempdir()) / 'devone-current-runtime-archives'
@@ -87,14 +127,28 @@ def seed_registry(root, home, manifests):
         assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
 
 
-def make_installer(root, home, output):
-    generated = root / 'src-tauri/target/x86_64-pc-windows-msvc/release/nsis/x64'
-    script = (generated / 'installer.nsi').read_text(encoding='utf-8-sig')
-    # Full vendor runtimes are large; zlib keeps packaging time practical.
-    script = re.sub(r'^  SetCompressor /SOLID "lzma"$', '  SetCompressor /SOLID "zlib"', script, flags=re.MULTILINE)
-    hooks = home.parent / 'bundled-hooks.nsh'
-    hook = ['!macro NSIS_HOOK_POSTINSTALL', '  SetOverwrite off']
-    for name in ['www', 'runtimes', 'tools', 'database', 'config', 'certs', 'logs', 'backups', 'cache']:
+def installer_hooks(home, manifests):
+    """NSIS hooks: install bundled Home files, keep the Home writable, and on a
+    real uninstall remove only what the installer shipped."""
+    hook = [
+        # Home lives beside the executable, so the folder must stay writable
+        # without elevation. Reject system locations on the directory page.
+        'Function .onVerifyInstDir',
+        '  StrLen $0 "$PROGRAMFILES64"',
+        '  StrCpy $1 "$INSTDIR" $0',
+        '  StrCmp $1 "$PROGRAMFILES64" devone_bad_dir',
+        '  StrLen $0 "$PROGRAMFILES"',
+        '  StrCpy $1 "$INSTDIR" $0',
+        '  StrCmp $1 "$PROGRAMFILES" devone_bad_dir',
+        '  StrLen $0 "$WINDIR"',
+        '  StrCpy $1 "$INSTDIR" $0',
+        '  StrCmp $1 "$WINDIR" devone_bad_dir',
+        '  Return',
+        '  devone_bad_dir:',
+        '  Abort',
+        'FunctionEnd',
+        '!macro NSIS_HOOK_POSTINSTALL', '  SetOverwrite off']
+    for name in HOME_DIRECTORIES:
         hook.append(f'  CreateDirectory "$INSTDIR\\{name}"')
     for item in sorted(home.rglob('*')):
         if not item.is_file() or item.name == 'devone-local.exe':
@@ -104,9 +158,32 @@ def make_installer(root, home, output):
         hook.extend([f'  SetOutPath "$INSTDIR\\{parent}"', f'  File "{item}"'])
     hook.extend(['  SetOutPath "$INSTDIR"', '  SetOverwrite on',
                  '  DetailPrint "PHP, MySQL LTS, Caddy and Node LTS are included. Existing Home data is preserved."',
-                 '!macroend', '!macro NSIS_HOOK_PREUNINSTALL',
-                 '  DetailPrint "Projects, databases and runtimes are preserved."', '!macroend'])
-    hooks.write_text('\n'.join(hook)+'\n', encoding='utf-8')
+                 '!macroend',
+                 '!macro NSIS_HOOK_PREUNINSTALL',
+                 '  DetailPrint "Projects, databases, credentials and CA data are preserved."',
+                 '!macroend',
+                 # Runs after Tauri stopped the app and removed its own files.
+                 '!macro NSIS_HOOK_POSTUNINSTALL',
+                 '  ${If} $UpdateMode <> 1'])
+    kinds = sorted({m['runtime'] for m in manifests})
+    for manifest in sorted(manifests, key=lambda m: (m['runtime'], m['version'])):
+        hook.append(f'    RMDir /r "$INSTDIR\\runtimes\\{manifest["runtime"]}\\{manifest["version"]}"')
+    hook.extend(f'    RMDir "$INSTDIR\\runtimes\\{kind}"' for kind in kinds)
+    hook.extend(['    Delete "$INSTDIR\\README.txt"',
+                 '    Delete "$INSTDIR\\config\\runtime-catalog.json"'])
+    # Non-recursive: only folders that are already empty disappear.
+    hook.extend(f'    RMDir "$INSTDIR\\{name}"' for name in HOME_DIRECTORIES)
+    hook.extend(['    RMDir "$INSTDIR"', '  ${EndIf}', '!macroend'])
+    return '\n'.join(hook)+'\n'
+
+
+def make_installer(root, home, manifests, output):
+    generated = root / 'src-tauri/target/x86_64-pc-windows-msvc/release/nsis/x64'
+    script = (generated / 'installer.nsi').read_text(encoding='utf-8-sig')
+    # Full vendor runtimes are large; zlib keeps packaging time practical.
+    script = re.sub(r'^  SetCompressor /SOLID "lzma"$', '  SetCompressor /SOLID "zlib"', script, flags=re.MULTILINE)
+    hooks = home.parent / 'bundled-hooks.nsh'
+    hooks.write_text(installer_hooks(home, manifests), encoding='utf-8')
     script, count = re.subn(r'^!include ".*\\installer\\hooks\.nsh"$',
                            lambda _: f'!include "{hooks}"', script, flags=re.MULTILINE)
     assert count == 1
@@ -162,7 +239,10 @@ def main():
     seed_registry(root, home, manifests)
     versions = ', '.join(f'{m["runtime"]} {m["version"]}' for m in manifests)
     (home / 'README.txt').write_text(f'''DEVONE Local - ชุดพร้อมใช้ Windows x64
-แตกโฟลเดอร์ devone-local ไปที่ D:\\ แล้วเปิด devone-local.exe ได้เลย
+Portable ZIP: แตกโฟลเดอร์ devone-local ไปไว้ที่ไหนก็ได้ที่เขียนไฟล์ได้ (เช่น D:\\ ห้าม Program Files) แล้วเปิด devone-local.exe
+เลิกใช้ portable: ปิดแอป (Quit) แล้วลบโฟลเดอร์ได้เลย
+Setup.exe: เลือกโฟลเดอร์ติดตั้งเอง ถอนการติดตั้งจาก Settings > Apps หรือ Control Panel > Programs
+การถอนการติดตั้งลบตัวโปรแกรมและ runtimes ที่มากับชุด แต่เก็บ www, database, backups, certs และ devone.db ไว้
 โปรเจกต์เก็บใน www โปรแกรมที่มาพร้อมชุดเก็บใน runtimes ข้อมูลฐานข้อมูลเก็บใน database
 รวม {versions} แล้ว ไม่ต้องดาวน์โหลด runtimes เหล่านี้เพิ่ม
 MySQL และ Node.js ใช้ LTS อย่างละหนึ่งเวอร์ชัน รุ่นอื่นเพิ่มภายหลังผ่านแอปได้
@@ -171,34 +251,42 @@ MySQL และ Node.js ใช้ LTS อย่างละหนึ่งเว
 ไม่มีฐานข้อมูลผู้ใช้ รหัสผ่าน หรือ CA private key ที่สร้างไว้จากเครื่องอื่น
 ย้ายเฉพาะโปรเจกต์ของคุณมาไว้ใน www ของชุดนี้ได้
 ''', encoding='utf-8')
-    report = {'home': str(home), 'runtimes': manifests, 'executable_sha256': sha256(exe)}
     release = root / 'release'
-    archive = release / f'DEVONE-Local-{version}-Windows-x64-Portable.zip'
-    with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as zipped:
-        for item in sorted(home.rglob('*')):
-            zipped.write(item, str(Path('devone-local') / item.relative_to(home)))
-    with zipfile.ZipFile(archive) as zipped:
-        if zipped.testzip() is not None:
-            raise ValueError('Portable ZIP integrity check failed')
-    report['portable'] = {'path': str(archive), 'bytes': archive.stat().st_size, 'sha256': sha256(archive)}
-    (release / 'bundled-artifacts.json').write_text(json.dumps(report, indent=2)+'\n', encoding='utf-8')
-    print(f'Portable bundle ready: {archive}', flush=True)
-    if args.installer:
-        output = release / f'DEVONE-Local-{version}-Windows-x64-Setup.exe'
-        make_installer(root, home, output)
-        report['installer'] = {'path': str(output), 'bytes': output.stat().st_size, 'sha256': sha256(output)}
-        (release / 'bundled-artifacts.json').write_text(json.dumps(report, indent=2)+'\n', encoding='utf-8')
-        print(f'Bundled installer ready: {output}', flush=True)
-        metadata = [{
-            'filename': output.name, 'version': version, 'target': 'x86_64-pc-windows-msvc',
-            'installer': 'NSIS current-user with bundled runtimes',
-            'bytes': output.stat().st_size, 'sha256': sha256(output),
+    names = release_names(version)
+    # Build inside release/ so publishing is a same-volume rename; nothing in
+    # release/ changes unless every artifact was produced.
+    release.mkdir(exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix='.build-', dir=release))
+    try:
+        archive = staging / names['portable']
+        with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as zipped:
+            for item in sorted(home.rglob('*')):
+                zipped.write(item, str(Path('devone-local') / item.relative_to(home)))
+        with zipfile.ZipFile(archive) as zipped:
+            if zipped.testzip() is not None:
+                raise ValueError('Portable ZIP integrity check failed')
+        print(f'Portable bundle built: {archive.name}', flush=True)
+        common = {
+            'version': version, 'target': 'x86_64-pc-windows-msvc',
             'runtimes': [{'runtime': m['runtime'], 'version': m['version']} for m in manifests],
+            'executable_sha256': sha256(exe),
             'packagingAudit': {'fixtureFeature': False, 'projectDependenciesBundled': False,
                                'userDataBundled': False, 'runtimeArchivesVerified': True},
-        }]
-        (release / 'release-artifacts.json').write_text(json.dumps(metadata, indent=2)+'\n', encoding='utf-8')
-    print(json.dumps({'home': str(home), 'portable': report['portable'], 'installer': report.get('installer')}), flush=True)
+        }
+        artifacts = [{'filename': archive.name, 'kind': 'portable-zip',
+                      'bytes': archive.stat().st_size, 'sha256': sha256(archive), **common}]
+        if args.installer:
+            output = staging / names['installer']
+            make_installer(root, home, manifests, output)
+            print(f'Bundled installer built: {output.name}', flush=True)
+            artifacts.insert(0, {'filename': output.name, 'kind': 'nsis-current-user-installer',
+                                 'bytes': output.stat().st_size, 'sha256': sha256(output), **common})
+        publish(release, staging, artifacts)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(home.parent, ignore_errors=True)
+    for artifact in artifacts:
+        print(f'{release / artifact["filename"]} ({artifact["bytes"]} bytes) SHA-256 {artifact["sha256"]}', flush=True)
 
 
 if __name__ == '__main__':

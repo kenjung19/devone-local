@@ -1,8 +1,4 @@
-import {
-  auditPayload,
-  copyReleaseOutput,
-  selectInstaller,
-} from "./release-output.mjs";
+import { auditPayload, selectInstaller } from "./release-output.mjs";
 import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -45,15 +41,10 @@ writeFileSync(
   join(directory, "release-artifacts.json"),
   JSON.stringify(report, null, 2) + "\n",
 );
-console.log(`Release artifacts: ${directory}`);
-for (const artifact of report)
-  console.log(
-    `${artifact.filename} (${artifact.bytes} bytes) SHA-256 ${artifact.sha256}`,
-  );
-
-console.log(
-  `Easy-to-find release output: ${copyReleaseOutput(root, directory, report)}`,
-);
+// The plain Tauri installer above is only an intermediate (it has no bundled
+// runtimes). release/ receives exactly two distributables, built below:
+// the bundled Setup.exe installer and the portable ZIP.
+console.log(`Intermediate Tauri installer: ${directory}`);
 
 const bundled = spawnSync(
   "py",

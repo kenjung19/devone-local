@@ -9,3 +9,4 @@ src-tauri/gen/schemas/
 .toolchain/
 
 /release/
+__pycache__/
