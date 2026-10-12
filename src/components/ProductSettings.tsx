@@ -90,6 +90,7 @@ export function ProductSettings({
           .test names resolve while DEVONE is running, including when it is in
           the tray. Quit stops the resolver; the owned Windows policy remains
           installed. Other domains keep their existing DNS configuration.
+          Setup also trusts the DEVONE HTTPS CA in the same Windows UAC prompt.
         </p>
         <div className="panel-buttons">
           <button disabled={busy} onClick={() => void act({ type: "dns" })}>

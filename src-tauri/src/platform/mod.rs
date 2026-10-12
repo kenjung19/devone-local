@@ -197,11 +197,44 @@ pub fn configure_wildcard_elevated(remove: bool) -> Result<()> {
     Ok(())
 }
 
+/// Local Domains setup, trusting the DEVONE CA in the same UAC prompt when
+/// `ca` (path, approved file SHA-256) is given.
+pub fn setup_wildcard_with_ca(ca: Option<(PathBuf, String)>) -> Result<()> {
+    #[cfg(windows)]
+    {
+        wildcard::elevate_with(
+            false,
+            ca.map(|(path, sha256)| wildcard::HelperOp::Ca {
+                remove: false,
+                sha256,
+                path,
+            }),
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = ca;
+        fail("Wildcard DNS setup is currently supported on Windows")
+    }
+}
+
 pub fn helper_dispatch() -> Option<Result<()>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     #[cfg(windows)]
     {
-        wildcard::helper_operation(&args).map(configure_wildcard_elevated)
+        wildcard::helper_operations(&args).map(|ops| {
+            for op in ops {
+                match op {
+                    wildcard::HelperOp::Dns { remove } => configure_wildcard_elevated(remove)?,
+                    wildcard::HelperOp::Ca {
+                        remove,
+                        sha256,
+                        path,
+                    } => windows::machine_ca_elevated(&path, &sha256, remove)?,
+                }
+            }
+            Ok(())
+        })
     }
     #[cfg(not(windows))]
     {

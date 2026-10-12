@@ -142,8 +142,9 @@ export function Setup({
             <>
               <h2>เปิดโปรเจกต์ด้วยชื่อ .test</h2>
               <p>
-                เช่น demo.test จะชี้ไปที่เครื่องนี้ Windows จะขอสิทธิ์ UAC
-                เฉพาะตอนตั้งค่า DNS ส่วนตัวแอปยังทำงานด้วยสิทธิ์ผู้ใช้ปกติ
+                เช่น demo.test จะชี้ไปที่เครื่องนี้ และเปิดด้วย HTTPS ได้ทันที
+                Windows จะขอสิทธิ์ UAC ครั้งเดียวเพื่อตั้งค่า DNS
+                และติดตั้ง HTTPS trust (ใช้ได้เฉพาะ .test) ส่วนตัวแอปยังทำงานด้วยสิทธิ์ผู้ใช้ปกติ
               </p>
               <dl className="setup-checks">
                 <div>
@@ -164,7 +165,7 @@ export function Setup({
                 </div>
               </dl>
               <button disabled={busy} onClick={() => void act({ type: "dns" })}>
-                ตั้งค่า / Retry DNS
+                ตั้งค่า DNS และ HTTPS / Retry
               </button>
             </>
           )}
@@ -173,8 +174,8 @@ export function Setup({
               <h2>ใช้งาน HTTPS ในเครื่อง</h2>
               <CaUpgradeNotice data={data} busy={busy} act={act} />
               <p>
-                สร้าง Local CA แล้วติดตั้ง trust ในบัญชี Windows นี้
-                เพื่อเปิดโปรเจกต์ผ่าน HTTPS
+                ขั้นตอนก่อนหน้าติดตั้ง HTTPS trust ให้แล้ว ถ้ายังไม่ได้ติดตั้ง
+                ให้กดติดตั้ง trust ด้านล่าง (Windows ขอ UAC หนึ่งครั้ง) CA นี้ใช้ได้เฉพาะ .test
               </p>
               <dl className="setup-checks">
                 <div>

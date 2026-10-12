@@ -133,9 +133,58 @@ fn trust_with(store: &Store, home: &Home, system: &impl TrustStore) -> Result<()
         system.install(&path)?;
     }
     if !system.trusted(&path) {
-        return fail("The CA is not present in the current user trust store after installation");
+        return fail("The CA is not present in the Windows trust store after installation");
     }
     record_trusted(store, &path)
+}
+/// Local Domains setup also trusts the DEVONE CA, in the same UAC prompt.
+/// The CA is generated first when Caddy is available. A legacy (not yet
+/// upgraded) CA or an ownership mismatch is left for Settings → HTTPS.
+pub fn setup_dns_and_trust(store: &Store, home: &Home) -> Result<()> {
+    let ca = pending_trust(store, home)?;
+    crate::platform::setup_wildcard_with_ca(ca.clone())?;
+    if let Some((path, _)) = ca {
+        if !crate::platform::ca_trusted(&path) {
+            return fail(
+                "Local domains are ready, but the DEVONE CA is not trusted yet; retry in Settings → HTTPS",
+            );
+        }
+        record_trusted(store, &path)?;
+    }
+    Ok(())
+}
+fn pending_trust(store: &Store, home: &Home) -> Result<Option<(std::path::PathBuf, String)>> {
+    let path = CaddyTls.ca_path(home);
+    if path != authority::root_path(home) {
+        return Ok(None);
+    }
+    if !path.is_file()
+        && let Err(error) = crate::setup::prepare_ca(store, home)
+    {
+        tracing::info!(%error, "HTTPS CA not prepared during Local Domains setup");
+        return Ok(None);
+    }
+    if authority::validate(home).is_err() {
+        return Ok(None);
+    }
+    let fingerprint = fingerprint(&path)?;
+    let recorded = store.setting("tls.ca_fingerprint")?.unwrap_or_default();
+    if !recorded.is_empty() && recorded != fingerprint {
+        return Ok(None);
+    }
+    if crate::platform::ca_trusted(&path) {
+        if recorded == fingerprint {
+            record_trusted(store, &path)?;
+        }
+        return Ok(None);
+    }
+    // Record exact ownership before the OS mutation, as trust_with does.
+    store.set_setting("tls.ca_fingerprint", &fingerprint)?;
+    store.conn.execute(
+        "UPDATE certificates SET trusted=0 WHERE id='caddy-local'",
+        [],
+    )?;
+    Ok(Some((path, fingerprint)))
 }
 fn record_trusted(store: &Store, path: &std::path::Path) -> Result<()> {
     store.conn.execute("INSERT INTO certificates(id,path,trusted) VALUES('caddy-local',?1,1) ON CONFLICT(id) DO UPDATE SET path=excluded.path,trusted=1",[path.to_string_lossy().to_string()])?;

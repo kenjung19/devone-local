@@ -663,7 +663,7 @@ fn apply(app: &mut Application, action: Action) -> Result<Response> {
                 if already_trusted {
                     "This exact DEVONE CA is already trusted. HTTPS trust state refreshed."
                 } else {
-                    "This exact DEVONE CA is trusted for the current Windows user."
+                    "This exact DEVONE CA is trusted on this computer (.test sites only)."
                 }
                 .into(),
             );
@@ -878,8 +878,13 @@ fn run_unlocked(
         Action::InstallTool { id, version, node } => {
             crate::tools::install(store, home, &id, &version, node.as_deref())?
         }
-        Action::Dns | Action::RemoveDns => {
-            crate::platform::setup_wildcard(matches!(action, Action::RemoveDns))?;
+        Action::Dns => {
+            // One UAC prompt sets up local domains and trusts the HTTPS CA.
+            crate::tls::setup_dns_and_trust(store, home)?;
+            lock(state)?.finish_dns();
+        }
+        Action::RemoveDns => {
+            crate::platform::setup_wildcard(true)?;
             lock(state)?.finish_dns();
         }
         Action::PrepareCa => crate::setup::prepare_ca(store, home)?,
@@ -890,7 +895,7 @@ fn run_unlocked(
                 if already_trusted {
                     "This exact DEVONE CA is already trusted. HTTPS trust state refreshed."
                 } else {
-                    "This exact DEVONE CA is trusted for the current Windows user."
+                    "This exact DEVONE CA is trusted on this computer (.test sites only)."
                 }
                 .into(),
             );

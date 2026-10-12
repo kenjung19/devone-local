@@ -1,20 +1,96 @@
-//! Fixed-scope elevated helper: no user paths or commands are accepted.
+//! Fixed-scope elevated helper. It accepts only fixed operations: the DNS
+//! policy, and trusting/untrusting one CA file that must match an approved
+//! SHA-256 and be a `.test`-only constrained root. No commands are accepted.
 use crate::core::{Result, fail};
+use std::path::PathBuf;
 use winreg::{RegKey, enums::*};
 const BASE: &str = r"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig";
 const POLICY: &str = "{9073AE66-0413-46F2-9F35-D0E001000001}";
 const OWNER: &str = "DEVONE Local wildcard DNS";
 const SETUP_ARG: &str = "--devone-setup-dns";
 const REMOVE_ARG: &str = "--devone-remove-dns";
-pub fn helper_argument(remove: bool) -> &'static str {
-    if remove { REMOVE_ARG } else { SETUP_ARG }
+const TRUST_CA_ARG: &str = "--devone-trust-ca";
+const UNTRUST_CA_ARG: &str = "--devone-untrust-ca";
+#[derive(Debug, Clone, PartialEq)]
+pub enum HelperOp {
+    Dns {
+        remove: bool,
+    },
+    /// LocalMachine\Root change for the CA at `path` whose file SHA-256 is `sha256`.
+    Ca {
+        remove: bool,
+        sha256: String,
+        path: PathBuf,
+    },
 }
-pub fn helper_operation(args: &[String]) -> Option<bool> {
-    match args {
-        [arg] if arg == SETUP_ARG => Some(false),
-        [arg] if arg == REMOVE_ARG => Some(true),
-        _ => None,
+impl HelperOp {
+    fn arguments(&self) -> Vec<String> {
+        match self {
+            HelperOp::Dns { remove } => {
+                vec![if *remove { REMOVE_ARG } else { SETUP_ARG }.into()]
+            }
+            HelperOp::Ca {
+                remove,
+                sha256,
+                path,
+            } => vec![
+                if *remove {
+                    UNTRUST_CA_ARG
+                } else {
+                    TRUST_CA_ARG
+                }
+                .into(),
+                sha256.clone(),
+                path.to_string_lossy().into_owned(),
+            ],
+        }
     }
+    fn label(ops: &[HelperOp]) -> &'static str {
+        if ops.iter().any(|op| matches!(op, HelperOp::Dns { .. })) {
+            "DNS HELPER"
+        } else {
+            "HTTPS TRUST HELPER"
+        }
+    }
+}
+/// Parses `[dns-op] [ca-op sha256 path]`: at most one of each, nothing else.
+pub fn helper_operations(args: &[String]) -> Option<Vec<HelperOp>> {
+    let mut ops = Vec::new();
+    let mut rest = args;
+    if let [first, tail @ ..] = rest
+        && (first == SETUP_ARG || first == REMOVE_ARG)
+    {
+        ops.push(HelperOp::Dns {
+            remove: first == REMOVE_ARG,
+        });
+        rest = tail;
+    }
+    match rest {
+        [] => {}
+        [op, sha256, path]
+            if (op == TRUST_CA_ARG || op == UNTRUST_CA_ARG)
+                && sha256.len() == 64
+                && sha256.bytes().all(|b| b.is_ascii_hexdigit())
+                && std::path::Path::new(path).is_absolute()
+                && !path.contains('"') =>
+        {
+            ops.push(HelperOp::Ca {
+                remove: op == UNTRUST_CA_ARG,
+                sha256: sha256.to_ascii_lowercase(),
+                path: PathBuf::from(path),
+            })
+        }
+        _ => return None,
+    }
+    (!ops.is_empty()).then_some(ops)
+}
+/// Quotes every argument for ShellExecute; operations never contain quotes.
+fn parameters(ops: &[HelperOp]) -> String {
+    ops.iter()
+        .flat_map(HelperOp::arguments)
+        .map(|a| format!("\"{a}\""))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 fn policy_conflict(message: &str) -> crate::core::Error {
     crate::core::Error::PolicyConflict(format!(
@@ -147,64 +223,28 @@ fn write_policy(k: &RegKey) -> Result<()> {
     Ok(())
 }
 pub fn elevate(remove: bool) -> Result<()> {
-    if remove && !owned() {
-        return Ok(());
-    }
-    if !remove {
+    elevate_with(remove, None)
+}
+/// DNS setup/removal plus, optionally, one CA trust change in the same UAC
+/// prompt. Whatever is already in the requested state is skipped.
+pub fn elevate_with(remove: bool, ca: Option<HelperOp>) -> Result<()> {
+    let dns = if remove {
+        owned()
+    } else {
         preflight()?;
+        !ready()
+    };
+    let mut ops = Vec::new();
+    if dns {
+        ops.push(HelperOp::Dns { remove });
     }
-    if !remove && ready() {
+    ops.extend(ca);
+    if ops.is_empty() {
         return Ok(());
     }
-    use windows_sys::Win32::{
-        Foundation::CloseHandle,
-        System::Threading::{GetExitCodeProcess, WaitForSingleObject},
-        UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW},
-    };
-    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
-    let exe = wide(&std::env::current_exe()?.to_string_lossy());
-    let verb = wide("runas");
-    let args = wide(helper_argument(remove));
-    unsafe {
-        let mut info: SHELLEXECUTEINFOW = std::mem::zeroed();
-        info.cbSize = std::mem::size_of_val(&info) as u32;
-        info.fMask = SEE_MASK_NOCLOSEPROCESS;
-        info.lpVerb = verb.as_ptr();
-        info.lpFile = exe.as_ptr();
-        info.lpParameters = args.as_ptr();
-        info.nShow = 0;
-        if ShellExecuteExW(&mut info) == 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() == Some(1223) {
-                return Err(uac_launch_error(1223));
-            }
-            if error.raw_os_error() == Some(5) {
-                return fail(
-                    "Windows denied permission for DNS setup. The application remains a normal user process; retry the helper.",
-                );
-            }
-            return Err(error.into());
-        }
-        if info.hProcess.is_null() {
-            return fail(
-                "DNS helper returned no process handle; inspect Local Domains state and retry",
-            );
-        }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        let waited = loop {
-            let status = WaitForSingleObject(info.hProcess, 100);
-            if status != 258 || std::time::Instant::now() >= deadline {
-                break status;
-            }
-            if crate::operation::cancelled() {
-                CloseHandle(info.hProcess);
-                return Err(crate::core::Error::Cancelled("DNS helper wait cancelled while quitting; verify the exact owned policy on next launch".into()));
-            }
-        };
-        let mut code = 1;
-        let ok = GetExitCodeProcess(info.hProcess, &mut code);
-        CloseHandle(info.hProcess);
-        helper_wait_result(waited, ok != 0, code)?;
+    run_elevated(&ops)?;
+    if !dns {
+        return Ok(());
     }
     if !remove && !ready() {
         return fail("DNS policy verification failed");
@@ -221,31 +261,97 @@ pub fn elevate(remove: bool) -> Result<()> {
     )?;
     Ok(())
 }
-fn uac_launch_error(code: i32) -> crate::core::Error {
+/// One CA trust change on its own (Settings → HTTPS, CA upgrade or recreation).
+pub fn elevate_ca(op: HelperOp) -> Result<()> {
+    run_elevated(&[op])
+}
+fn run_elevated(ops: &[HelperOp]) -> Result<()> {
+    let label = HelperOp::label(ops);
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::Threading::{GetExitCodeProcess, WaitForSingleObject},
+        UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW},
+    };
+    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    let exe = wide(&std::env::current_exe()?.to_string_lossy());
+    let verb = wide("runas");
+    let args = wide(&parameters(ops));
+    unsafe {
+        let mut info: SHELLEXECUTEINFOW = std::mem::zeroed();
+        info.cbSize = std::mem::size_of_val(&info) as u32;
+        info.fMask = SEE_MASK_NOCLOSEPROCESS;
+        info.lpVerb = verb.as_ptr();
+        info.lpFile = exe.as_ptr();
+        info.lpParameters = args.as_ptr();
+        info.nShow = 0;
+        if ShellExecuteExW(&mut info) == 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(1223) {
+                return Err(uac_launch_error(label, 1223));
+            }
+            if error.raw_os_error() == Some(5) {
+                return fail(format!(
+                    "{label}: Windows denied permission. The application remains a normal user process; retry the helper."
+                ));
+            }
+            return Err(error.into());
+        }
+        if info.hProcess.is_null() {
+            return fail(format!(
+                "{label}: no process handle was returned; inspect Local Domains and HTTPS state and retry"
+            ));
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let waited = loop {
+            let status = WaitForSingleObject(info.hProcess, 100);
+            if status != 258 || std::time::Instant::now() >= deadline {
+                break status;
+            }
+            if crate::operation::cancelled() {
+                CloseHandle(info.hProcess);
+                return Err(crate::core::Error::Cancelled(format!(
+                    "{label} wait cancelled while quitting; verify Local Domains and HTTPS state on next launch"
+                )));
+            }
+        };
+        let mut code = 1;
+        let ok = GetExitCodeProcess(info.hProcess, &mut code);
+        CloseHandle(info.hProcess);
+        helper_wait_result(label, waited, ok != 0, code)?;
+    }
+    Ok(())
+}
+fn uac_launch_error(label: &str, code: i32) -> crate::core::Error {
     if code == 1223 {
-        crate::core::Error::Cancelled("Local domain setup was cancelled at the Windows UAC prompt. No helper was started and no system settings were changed. Retry Local Domains setup when ready.".into())
+        crate::core::Error::Cancelled(format!(
+            "{label}: cancelled at the Windows UAC prompt. No helper was started and no system settings were changed. Retry when ready."
+        ))
     } else {
         crate::core::Error::Message(format!(
-            "DNS helper could not start (Windows error {code}); retry Local Domains setup"
+            "{label} could not start (Windows error {code}); retry"
         ))
     }
 }
-fn helper_wait_result(waited: u32, queried: bool, code: u32) -> Result<()> {
+fn helper_wait_result(label: &str, waited: u32, queried: bool, code: u32) -> Result<()> {
     match waited {
-        258 => fail(
-            "DNS HELPER TIMEOUT: the helper has not confirmed completion. Do not assume no change; inspect Local Domains state before retrying or removing the exact owned policy.",
-        ),
-        0 if !queried => {
-            fail("DNS helper exit status could not be read; inspect Local Domains state and retry")
-        }
+        258 => fail(format!(
+            "{label} TIMEOUT: the helper has not confirmed completion. Do not assume no change; inspect Local Domains and HTTPS state before retrying."
+        )),
+        0 if !queried => fail(format!(
+            "{label}: exit status could not be read; inspect Local Domains and HTTPS state and retry"
+        )),
         0 if code == 0 => Ok(()),
-        0 if code == 2 => Err(policy_conflict("The elevated helper detected a conflicting Windows DNS policy")),
-        0 if code == 3 => Err(crate::core::Error::NotElevated("DNS HELPER NOT ELEVATED: Windows did not provide an Administrator token; retry the isolated helper".into())),
+        0 if code == 2 => Err(policy_conflict(
+            "The elevated helper detected a conflicting Windows DNS policy",
+        )),
+        0 if code == 3 => Err(crate::core::Error::NotElevated(format!(
+            "{label} NOT ELEVATED: Windows did not provide an Administrator token; retry the isolated helper"
+        ))),
         0 => fail(format!(
-            "DNS HELPER FAILED (exit {code}). Check policy ownership/conflicts and retry Local Domains setup; any partial policy is retained only with its exact DEVONE marker."
+            "{label} FAILED (exit {code}). Retry; DNS changes keep their exact DEVONE marker and only an approved .test-only DEVONE CA is ever trusted."
         )),
         _ => fail(format!(
-            "DNS helper wait failed (Windows status {waited}); inspect Local Domains state and retry"
+            "{label}: wait failed (Windows status {waited}); inspect Local Domains and HTTPS state and retry"
         )),
     }
 }
@@ -284,41 +390,76 @@ mod tests {
     fn helper_arguments_and_results_do_not_accept_arbitrary_input() {
         use super::*;
         use crate::core::Error;
-        for remove in [false, true] {
-            assert_eq!(
-                helper_operation(&[helper_argument(remove).into()]),
-                Some(remove)
-            );
+        let sha = "a".repeat(64);
+        let ca = HelperOp::Ca {
+            remove: false,
+            sha256: sha.clone(),
+            path: PathBuf::from(r"D:\Home with space\certs\devone-ca\root.crt"),
+        };
+        for ops in [
+            vec![HelperOp::Dns { remove: false }],
+            vec![HelperOp::Dns { remove: true }],
+            vec![ca.clone()],
+            vec![HelperOp::Dns { remove: false }, ca.clone()],
+        ] {
+            let args: Vec<String> = ops.iter().flat_map(HelperOp::arguments).collect();
+            assert_eq!(helper_operations(&args), Some(ops.clone()));
+            // ShellExecute parameters quote each argument, including spaces.
+            assert!(parameters(&ops).starts_with('"'));
         }
         for args in [
             vec![],
             vec!["--devone-setup-dns".into(), "D:\\foreign".into()],
             vec!["--devone-setup-dns & whoami".into()],
             vec!["--home".into()],
+            // CA operations need a full SHA-256 and an absolute, unquoted path.
+            vec![
+                "--devone-trust-ca".into(),
+                "abc".into(),
+                r"D:\root.crt".into(),
+            ],
+            vec!["--devone-trust-ca".into(), sha.clone(), "root.crt".into()],
+            vec![
+                "--devone-trust-ca".into(),
+                sha.clone(),
+                "D:\\a\" & x".into(),
+            ],
+            vec!["--devone-trust-ca".into(), sha.clone()],
+            // CA first, or two DNS operations, are not accepted.
+            vec![
+                "--devone-trust-ca".into(),
+                sha.clone(),
+                r"D:\root.crt".into(),
+                "--devone-setup-dns".into(),
+            ],
+            vec!["--devone-setup-dns".into(), "--devone-remove-dns".into()],
         ] {
-            assert_eq!(helper_operation(&args), None);
+            assert_eq!(helper_operations(&args), None, "{args:?}");
         }
-        assert!(matches!(uac_launch_error(1223), Error::Cancelled(_)));
+        assert!(matches!(
+            uac_launch_error("DNS HELPER", 1223),
+            Error::Cancelled(_)
+        ));
         assert_eq!(
             crate::core::helper_exit_code(&policy_conflict("foreign policy")),
             2
         );
         assert!(matches!(
-            helper_wait_result(0, true, 2),
+            helper_wait_result("DNS HELPER", 0, true, 2),
             Err(Error::PolicyConflict(_))
         ));
         assert!(matches!(
-            helper_wait_result(0, true, 3),
+            helper_wait_result("DNS HELPER", 0, true, 3),
             Err(Error::NotElevated(_))
         ));
-        assert!(helper_wait_result(0, true, 0).is_ok()); // retry after cancel
+        assert!(helper_wait_result("DNS HELPER", 0, true, 0).is_ok()); // retry after cancel
         for (wait, query, code) in [
             (258, true, 259),
             (u32::MAX, true, 0),
             (0, false, 0),
             (0, true, 1),
         ] {
-            assert!(helper_wait_result(wait, query, code).is_err());
+            assert!(helper_wait_result("DNS HELPER", wait, query, code).is_err());
         }
     }
     #[test]

@@ -200,28 +200,103 @@ fn replace_preserving_metadata(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     result
 }
+/// Trusts the DEVONE CA machine-wide through the elevated helper (one UAC
+/// prompt, no separate certificate warning). The helper re-checks the file.
 pub fn trust_ca(path: &Path) -> Result<()> {
-    // Windows may ask the user to approve a new root. Never leave a backend
-    // worker blocked indefinitely when that confirmation is not completed.
-    let outcome = crate::process::run_bounded(
-        &system_executable("certutil.exe")?,
-        &ca_install_args(path),
-        path.parent()
-            .ok_or_else(|| crate::core::Error::Message("CA has no parent directory".into()))?,
-        &BTreeMap::new(),
-        std::time::Duration::from_secs(120),
-    )?;
-    // A command can fail after adding the certificate. Report the real exact
-    // store state, rather than a timeout/cancellation when trust already exists.
-    ca_install_result(outcome, ca_trusted(path))
+    super::wildcard::elevate_ca(super::wildcard::HelperOp::Ca {
+        remove: false,
+        sha256: crate::tls::fingerprint(path)?,
+        path: path.to_path_buf(),
+    })?;
+    if !ca_trusted(path) {
+        return fail("The DEVONE CA is not trusted after the Windows helper finished; retry");
+    }
+    Ok(())
 }
-fn ca_install_args(path: &Path) -> Vec<String> {
-    vec![
-        "-user".into(),
-        "-addstore".into(),
-        "Root".into(),
-        path.to_string_lossy().into(),
-    ]
+/// Reads `path` once and accepts it only if its SHA-256 is the one approved
+/// by the unelevated app and it is a `.test`-only constrained root. Returns
+/// the DER, so the store change uses exactly the bytes that were checked.
+fn approved_root_der(path: &Path, sha256: &str) -> Result<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+    let bytes = fs::read(path)?;
+    let actual: String = Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if actual != sha256 {
+        return fail("The CA file changed after it was approved; nothing was trusted");
+    }
+    crate::tls::authority::constrained_root_der(&bytes)
+}
+/// Elevated helper only: add or remove one approved DEVONE root in
+/// LocalMachine\Root. Never touches any other certificate.
+pub fn machine_ca_elevated(path: &Path, sha256: &str, remove: bool) -> Result<()> {
+    use windows_sys::Win32::Security::Cryptography::*;
+    if unsafe { windows_sys::Win32::UI::Shell::IsUserAnAdmin() } == 0 {
+        return Err(crate::core::Error::NotElevated(
+            "HTTPS TRUST HELPER NOT ELEVATED: approve the Windows prompt".into(),
+        ));
+    }
+    let der = approved_root_der(path, sha256)?;
+    let name: Vec<u16> = "ROOT".encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let store = CertOpenStore(
+            CERT_STORE_PROV_SYSTEM_W,
+            0,
+            0,
+            CERT_SYSTEM_STORE_LOCAL_MACHINE,
+            name.as_ptr() as *const _,
+        );
+        if store.is_null() {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let result = if remove {
+            let context =
+                CertCreateCertificateContext(X509_ASN_ENCODING, der.as_ptr(), der.len() as u32);
+            if context.is_null() {
+                Err(std::io::Error::last_os_error().into())
+            } else {
+                let found = CertFindCertificateInStore(
+                    store,
+                    X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+                    0,
+                    CERT_FIND_EXISTING,
+                    context as *const _,
+                    std::ptr::null(),
+                );
+                CertFreeCertificateContext(context);
+                // Delete only the exact DER; CertDelete frees `found`.
+                if found.is_null() {
+                    Ok(())
+                } else if std::slice::from_raw_parts(
+                    (*found).pbCertEncoded,
+                    (*found).cbCertEncoded as usize,
+                ) != der.as_slice()
+                {
+                    CertFreeCertificateContext(found);
+                    fail("A different certificate matched; nothing was removed")
+                } else if CertDeleteCertificateFromStore(found) == 0 {
+                    Err(std::io::Error::last_os_error().into())
+                } else {
+                    Ok(())
+                }
+            }
+        } else if CertAddEncodedCertificateToStore(
+            store,
+            X509_ASN_ENCODING,
+            der.as_ptr(),
+            der.len() as u32,
+            CERT_STORE_ADD_USE_EXISTING,
+            std::ptr::null_mut(),
+        ) == 0
+        {
+            Err(std::io::Error::last_os_error().into())
+        } else {
+            Ok(())
+        };
+        CertCloseStore(store, 0);
+        result
+    }
 }
 fn ca_remove_args(id: &str) -> Result<Vec<String>> {
     if id.len() != 40 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -234,19 +309,6 @@ fn ca_remove_args(id: &str) -> Result<Vec<String>> {
         id.into(),
     ])
 }
-fn ca_install_result(outcome: crate::process::CommandOutcome, trusted: bool) -> Result<()> {
-    use crate::{core::Error, process::CommandOutcome};
-    if trusted {
-        return Ok(());
-    }
-    match outcome {
-        CommandOutcome::Exited { code: Some(code), .. } if matches!(code as u32, 1223 | 0x800704c7) =>
-            Err(Error::Cancelled("HTTPS trust installation was cancelled. This CA is not trusted; retry Install trust when ready.".into())),
-        CommandOutcome::TimedOut => Err(Error::ApprovalRequired("INTERACTIVE APPROVAL REQUIRED: Windows CA installation did not complete within 120 seconds. This CA is not trusted. Retry Install trust and approve its Windows confirmation; if already approved, inspect Windows certificate policy. Exact ownership is retained for cleanup.".into())),
-        CommandOutcome::Exited { code, output } => fail(format!("Windows CA installation failed (exit {code:?}). This CA is not trusted; retry Install trust. {output}")),
-    }
-}
-
 pub struct Ownership(HANDLE);
 unsafe impl Send for Ownership {}
 impl Ownership {
@@ -403,7 +465,22 @@ impl Drop for Ownership {
     }
 }
 
+/// Trusted for this user: the CurrentUser Root view also includes roots
+/// installed machine-wide in LocalMachine\Root.
 pub fn ca_trusted(path: &Path) -> bool {
+    root_store_contains(
+        path,
+        windows_sys::Win32::Security::Cryptography::CERT_SYSTEM_STORE_CURRENT_USER,
+    )
+}
+/// Installed machine-wide (LocalMachine\Root), where DEVONE now trusts its CA.
+fn machine_ca_trusted(path: &Path) -> bool {
+    root_store_contains(
+        path,
+        windows_sys::Win32::Security::Cryptography::CERT_SYSTEM_STORE_LOCAL_MACHINE,
+    )
+}
+fn root_store_contains(path: &Path, location: u32) -> bool {
     use windows_sys::Win32::Security::Cryptography::*;
     if !path.is_file() {
         return false;
@@ -436,7 +513,7 @@ pub fn ca_trusted(path: &Path) -> bool {
             CERT_STORE_PROV_SYSTEM_W,
             0,
             0,
-            CERT_SYSTEM_STORE_CURRENT_USER | CERT_STORE_READONLY_FLAG,
+            location | CERT_STORE_READONLY_FLAG,
             name.as_ptr() as *const _,
         );
         if store.is_null() {
@@ -528,15 +605,28 @@ fn certificate_store_id(path: &Path) -> Result<String> {
 }
 
 pub fn remove_ca_trust(path: &Path) -> Result<()> {
-    // CertDeleteCertificateFromStore on the protected logical Root store can
-    // open a modal Windows confirmation on the backend worker. DEVONE already
-    // confirms this action in Settings and verifies its SHA-256 ownership record.
-    // certutil uses an exact full fingerprint, CurrentUser only, with a bounded
-    // process lifetime. Never pass a subject, serial number, index or wildcard.
-    let id = certificate_store_id(path)?;
+    // Machine-wide trust (current installs) is removed by the elevated helper,
+    // which deletes only the exact approved DER from LocalMachine\Root.
+    if machine_ca_trusted(path) {
+        super::wildcard::elevate_ca(super::wildcard::HelperOp::Ca {
+            remove: true,
+            sha256: crate::tls::fingerprint(path)?,
+            path: path.to_path_buf(),
+        })?;
+        if machine_ca_trusted(path) {
+            return fail("The exact DEVONE CA is still trusted machine-wide; retry");
+        }
+    }
+    // Older installs trusted the CA per user. CertDeleteCertificateFromStore on
+    // the protected logical Root store can open a modal Windows confirmation on
+    // the backend worker. DEVONE already confirms this action in Settings and
+    // verifies its SHA-256 ownership record. certutil uses an exact full
+    // fingerprint, CurrentUser only, with a bounded process lifetime. Never pass
+    // a subject, serial number, index or wildcard.
     if !ca_trusted(path) {
         return Ok(());
     }
+    let id = certificate_store_id(path)?;
     crate::process::run_checked(
         &system_executable("certutil.exe")?,
         &ca_remove_args(&id)?,
@@ -994,12 +1084,6 @@ mod secret_tests {
     #[test]
     fn ca_commands_and_numeric_authorization_results_are_exact() {
         use super::*;
-        use crate::{core::Error, process::CommandOutcome};
-        let path = Path::new(r"D:\project & user\root.crt");
-        assert_eq!(
-            ca_install_args(path),
-            vec!["-user", "-addstore", "Root", r"D:\project & user\root.crt"]
-        );
         let id = "0123456789abcdef0123456789abcdef01234567";
         assert_eq!(
             ca_remove_args(id).unwrap(),
@@ -1013,43 +1097,34 @@ mod secret_tests {
         ] {
             assert!(ca_remove_args(invalid).is_err());
         }
-        for code in [1223, 0x800704c7u32 as i32] {
+    }
+    #[test]
+    fn elevated_helper_trusts_only_the_approved_constrained_root() {
+        use super::*;
+        let d = tempfile::tempdir().unwrap();
+        let home = crate::config::Home::new(d.path());
+        home.ensure().unwrap();
+        crate::tls::authority::ensure(&home).unwrap();
+        let root = crate::tls::authority::root_path(&home);
+        let sha = crate::tls::fingerprint(&root).unwrap();
+        assert!(!approved_root_der(&root, &sha).unwrap().is_empty());
+        // A file swapped after approval is refused.
+        assert!(approved_root_der(&root, &"0".repeat(64)).is_err());
+        // An unconstrained CA (could sign any domain) is refused even if approved.
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::default();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(1));
+        let foreign = d.path().join("foreign.crt");
+        fs::write(&foreign, params.self_signed(&key).unwrap().pem()).unwrap();
+        let foreign_sha = crate::tls::fingerprint(&foreign).unwrap();
+        assert!(approved_root_der(&foreign, &foreign_sha).is_err());
+        // Without an Administrator token the helper changes nothing.
+        if unsafe { windows_sys::Win32::UI::Shell::IsUserAnAdmin() } == 0 {
             assert!(matches!(
-                ca_install_result(
-                    CommandOutcome::Exited {
-                        code: Some(code),
-                        output: "localized output".into()
-                    },
-                    false
-                ),
-                Err(Error::Cancelled(_))
+                machine_ca_elevated(&root, &sha, false),
+                Err(crate::core::Error::NotElevated(_))
             ));
         }
-        assert!(matches!(
-            ca_install_result(CommandOutcome::TimedOut, false),
-            Err(Error::ApprovalRequired(_))
-        ));
-        assert!(
-            ca_install_result(
-                CommandOutcome::Exited {
-                    code: Some(5),
-                    output: "denied".into()
-                },
-                false
-            )
-            .is_err()
-        );
-        assert!(
-            ca_install_result(
-                CommandOutcome::Exited {
-                    code: Some(0),
-                    output: String::new()
-                },
-                false
-            )
-            .is_err()
-        );
-        assert!(ca_install_result(CommandOutcome::TimedOut, true).is_ok());
     }
     #[test]
     fn listener_ownership() {

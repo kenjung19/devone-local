@@ -157,7 +157,11 @@ impl Application {
     }
     pub fn setup_dns(&mut self, remove: bool) -> Result<()> {
         self.prepare_dns(remove)?;
-        crate::platform::setup_wildcard(remove)?;
+        if remove {
+            crate::platform::setup_wildcard(true)?;
+        } else {
+            crate::tls::setup_dns_and_trust(&self.store, &self.home)?;
+        }
         self.finish_dns();
         Ok(())
     }

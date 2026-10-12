@@ -66,16 +66,23 @@ pub(super) fn parameters() -> Result<CertificateParams> {
     });
     Ok(params)
 }
-pub fn validate(home: &Home) -> Result<()> {
-    let cert_path = root_path(home);
-    let key_path = key_path(home);
-    safe_path(home, &cert_path)?;
-    safe_path(home, &key_path)?;
-    let bytes = std::fs::read(&cert_path)?;
+/// Checks that PEM `bytes` hold a self-signed root shaped like DEVONE's:
+/// critical CA pathLen 1, signing-only key usage and critical name constraints
+/// permitting only `.test` and excluding every IP. Returns the DER encoding.
+/// The elevated helper relies on this to never trust any other certificate.
+pub fn constrained_root_der(bytes: &[u8]) -> Result<Vec<u8>> {
     let (_, pem) =
-        parse_x509_pem(&bytes).map_err(|e| Error::Message(format!("Invalid DEVONE root: {e}")))?;
+        parse_x509_pem(bytes).map_err(|e| Error::Message(format!("Invalid DEVONE root: {e}")))?;
     let (_, cert) = X509Certificate::from_der(&pem.contents)
         .map_err(|e| Error::Message(format!("Invalid DEVONE root: {e}")))?;
+    if !constrained(&cert) {
+        return fail(
+            "DEVONE CA must be a self-signed root with critical .test-only name constraints, no IPs, pathLen 1 and signing key usage",
+        );
+    }
+    Ok(pem.contents)
+}
+fn constrained(cert: &X509Certificate) -> bool {
     let mut basic = false;
     let mut usage = false;
     let mut constraints = false;
@@ -102,11 +109,19 @@ pub fn validate(home: &Home) -> Result<()> {
             _ => {}
         }
     }
+    basic && usage && constraints && cert.subject() == cert.issuer()
+}
+pub fn validate(home: &Home) -> Result<()> {
+    let cert_path = root_path(home);
+    let key_path = key_path(home);
+    safe_path(home, &cert_path)?;
+    safe_path(home, &key_path)?;
+    let der = constrained_root_der(&std::fs::read(&cert_path)?)?;
+    let (_, cert) = X509Certificate::from_der(&der)
+        .map_err(|e| Error::Message(format!("Invalid DEVONE root: {e}")))?;
     let key_pem = zeroize::Zeroizing::new(std::fs::read_to_string(key_path)?);
     let key = KeyPair::from_pem(&key_pem).map_err(|e| Error::Message(e.to_string()))?;
-    if !(basic && usage && constraints)
-        || cert.subject() != cert.issuer()
-        || key.algorithm() != &PKCS_ECDSA_P256_SHA256
+    if key.algorithm() != &PKCS_ECDSA_P256_SHA256
         || key.subject_public_key_info() != cert.public_key().raw
     {
         return fail(
