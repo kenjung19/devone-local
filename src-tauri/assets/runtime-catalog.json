@@ -66,7 +66,7 @@
       "binaries": {
         "server": "bin/httpd.exe"
       },
-      "sha256": "7c78cda3aed9a6b5af7af640b6b961ae0566ab933bbbca3d39ef5dd3912386f3",
+      "sha256": "2cd1f349b6705e43e784e876a233eeb1a859fa6b8abc693a91f87b35a368f7f9",
       "metadata": {
         "source": "Apache Lounge",
         "archive_root": "Apache24"

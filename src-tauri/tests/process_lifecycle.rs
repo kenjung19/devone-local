@@ -414,6 +414,8 @@ fn project_creation_cancellation_terminates_owned_generator_and_preserves_unrela
     let request = templates::Request {
         name: "cancelled-project".into(),
         template: "custom-slow".into(),
+        profile_id: None,
+        web_server: None,
         runtimes: std::collections::BTreeMap::from([("node".into(), "24.21.0".into())]),
         tools: Default::default(),
         install_dependencies: false,

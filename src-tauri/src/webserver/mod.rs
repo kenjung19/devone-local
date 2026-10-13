@@ -80,7 +80,6 @@ fn apache_config(
     let log = native_path(&home.path("logs").join(format!("apache-{}.log", site.id)))?;
     let pid = native_path(&home.path("config/web").join(format!("apache-{}.pid", site.id)))?;
     let mut modules = vec![
-        "LoadModule mpm_winnt_module modules/mod_mpm_winnt.so",
         "LoadModule authz_core_module modules/mod_authz_core.so",
         "LoadModule authz_host_module modules/mod_authz_host.so",
         "LoadModule dir_module modules/mod_dir.so",
@@ -93,7 +92,9 @@ fn apache_config(
                 "LoadModule proxy_module modules/mod_proxy.so",
                 "LoadModule proxy_fcgi_module modules/mod_proxy_fcgi.so",
             ]);
-            format!("<FilesMatch \\.php$>\n SetHandler \"proxy:fcgi://127.0.0.1:{upstream}\"\n</FilesMatch>")
+            format!(
+                "<FilesMatch \\.php$>\n SetHandler \"proxy:fcgi://127.0.0.1:{upstream}/\"\n</FilesMatch>\nProxyFCGISetEnvIf \"true\" SCRIPT_FILENAME \"{document_root}%{{reqenv:SCRIPT_NAME}}\""
+            )
         }
         crate::projects::metadata::RouteStrategy::NodeProxy => {
             modules.extend([
@@ -144,12 +145,12 @@ fn caddy_backend_config(home: &Home, site: &Site, listen: u16, upstream: u16) ->
         crate::projects::metadata::RouteStrategy::Static => "file_server".into(),
     };
     Ok(format!(
-        "# DEVONE generated site backend\n{{\n admin off\n auto_https off\n}}\nhttp://127.0.0.1:{listen} {{\n root * \"{document_root}\"\n {handler}\n log {{\n  output file \"{log}\"\n }}\n}}\n"
+        "# DEVONE generated site backend\n{{\n admin off\n auto_https off\n}}\nhttp://:{listen} {{\n bind 127.0.0.1\n root * \"{document_root}\"\n {handler}\n log {{\n  output file \"{log}\"\n }}\n}}\n"
     ))
 }
 
-/// Starts an isolated loopback-only backend for one Apache/Nginx-bound site.
-/// Caddy-bound sites continue to be served directly by the DEVONE ingress.
+/// Starts an isolated loopback-only backend for one site. The selected provider
+/// is always site-owned; the separate DEVONE Caddy ingress remains the HTTPS front door.
 pub fn reconcile_site_backend(
     store: &Store,
     home: &Home,
@@ -175,24 +176,29 @@ pub fn reconcile_site_backend(
         },
     )?;
     crate::runtime::validate_at(&runtime.manifest, &runtime.root(home))?;
-    let reservation = PortManager::allocate_process(store, &key)?;
-    let listen = reservation.port;
     let directory = home.path("config/web");
     std::fs::create_dir_all(&directory)?;
     let config = directory.join(format!("{}-{}.conf", provider, site.id));
-    let text = match provider {
-        "caddy" => caddy_backend_config(home, site, listen, upstream)?,
-        "apache" => apache_config(home, &runtime, site, listen, upstream)?,
-        _ => nginx_config(home, site, listen, upstream)?,
+    let render = |listen| match provider {
+        "caddy" => caddy_backend_config(home, site, listen, upstream),
+        "apache" => apache_config(home, &runtime, site, listen, upstream),
+        _ => nginx_config(home, site, listen, upstream),
     };
-    if supervisor.contains(&key)
-        && std::fs::read_to_string(&config).ok().as_deref() == Some(&text)
-    {
-        return Ok(Some(listen));
-    }
     if supervisor.contains(&key) {
+        let listen = store.conn.query_row(
+            "SELECT port FROM port_allocations WHERE owner=?1",
+            [&key],
+            |row| row.get(0),
+        )?;
+        let text = render(listen)?;
+        if std::fs::read_to_string(&config).ok().as_deref() == Some(&text) {
+            return Ok(Some(listen));
+        }
         supervisor.stop(store, &key)?;
     }
+    let reservation = PortManager::allocate_process(store, &key)?;
+    let listen = reservation.port;
+    let text = render(listen)?;
     crate::runtime::atomic_write(&config, text.as_bytes())?;
     let binary = runtime.binary(home, "server")?;
     let (validate, args, graceful) = if provider == "caddy" {
@@ -234,6 +240,10 @@ pub fn reconcile_site_backend(
         stop.extend(["-s".into(), "quit".into()]);
         (validate, common, Some((binary.clone(), stop)))
     };
+    // Nginx's config test opens the configured listening socket. Release the
+    // allocation guard before validating so the provider does not collide with
+    // DEVONE's own reservation.
+    drop(reservation);
     crate::process::run_checked(
         &binary,
         &validate,
@@ -241,7 +251,6 @@ pub fn reconcile_site_backend(
         &BTreeMap::new(),
         Duration::from_secs(15),
     )?;
-    drop(reservation);
     supervisor.start(
         store,
         Spec {
@@ -485,7 +494,12 @@ mod tests {
         ).unwrap();
         let nginx = nginx_config(&home, &site("nginx", "laravel"), 43002, 43102).unwrap();
         assert!(apache.contains("Listen 127.0.0.1:43001"));
-        assert!(apache.contains("proxy:fcgi://127.0.0.1:43101"));
+        assert!(apache.contains("<FilesMatch \\.php$>"));
+        assert!(apache.contains("proxy:fcgi://127.0.0.1:43101/"));
+        assert!(apache.contains(
+            "ProxyFCGISetEnvIf \"true\" SCRIPT_FILENAME \"C:/Projects/mixed/public%{reqenv:SCRIPT_NAME}\""
+        ));
+        assert!(!apache.contains("mod_mpm_winnt.so"));
         assert!(nginx.contains("listen 127.0.0.1:43002"));
         assert!(nginx.contains("fastcgi_pass 127.0.0.1:43102"));
         assert!(!apache.contains("43102"));
@@ -495,7 +509,8 @@ mod tests {
     fn caddy_site_backend_is_plain_loopback_and_has_no_public_tls() {
         let home = Home::new(std::path::Path::new("C:/Devone"));
         let text = caddy_backend_config(&home, &site("caddy", "static"), 44001, 0).unwrap();
-        assert!(text.contains("http://127.0.0.1:44001"));
+        assert!(text.contains("http://:44001"));
+        assert!(text.contains("bind 127.0.0.1"));
         assert!(text.contains("auto_https off"));
         assert!(!text.contains("tls internal"));
     }

@@ -634,14 +634,23 @@ impl Application {
         // leave a partially-started Apache/Nginx/Caddy backend behind.
         let mut needs_ingress = false;
         for site in &sites {
-            if self
+            let enabled = self
                 .store
                 .setting(&format!("site.{}.disabled", site.id))?
                 .as_deref()
-                != Some("true")
-                && (site.metadata.runtimes.contains_key("web_server")
-                    || site.metadata.framework == "static")
-            {
+                != Some("true");
+            let will_route = match site.metadata.route {
+                crate::projects::metadata::RouteStrategy::Static
+                | crate::projects::metadata::RouteStrategy::PhpFastcgi => true,
+                crate::projects::metadata::RouteStrategy::NodeProxy => site
+                    .processes
+                    .iter()
+                    .find(|process| process.definition.id == "web" && process.enabled)
+                    .is_some_and(|process| {
+                        process.definition.autostart || self.supervisor.contains(&process.key)
+                    }),
+            };
+            if enabled && will_route {
                 needs_ingress = true;
                 break;
             }

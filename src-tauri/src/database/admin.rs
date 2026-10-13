@@ -243,6 +243,9 @@ fn finish_create(app: &mut Application, b: &Managed) -> Result<()> {
     Ok(())
 }
 pub fn delete(app: &mut Application, id: &str, name: &str, confirmation: &str) -> Result<()> {
+    if confirmation.is_empty() {
+        return fail("Type the exact database name to confirm destructive deletion");
+    }
     let b = confirmed_binding(
         &app.store,
         id,

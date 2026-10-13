@@ -177,7 +177,7 @@ fn resolve_default(store: &Store, binding: &Binding) -> Result<Option<String>> {
         return Ok(Some(version.clone()));
     }
     if binding.provider == "caddy" || binding.provider == "apache" || binding.provider == "nginx" {
-        return Ok(store.setting(&format!("default.{}", binding.provider))?);
+        return store.setting(&format!("default.{}", binding.provider));
     }
     store.setting(&format!("default.{}", binding.provider))
 }

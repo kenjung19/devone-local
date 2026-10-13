@@ -102,7 +102,7 @@ impl PortManager {
 /// Owners whose port is only consumed by configuration DEVONE regenerates from
 /// live state. Ports written into project files (MySQL, Mailpit SMTP) never move.
 fn may_fall_back(owner: &str) -> bool {
-    ["site:", "php:"]
+    ["site:", "web:", "php:"]
         .iter()
         .any(|prefix| owner.starts_with(prefix))
         || matches!(owner, "caddy-admin" | "mailpit:web")
@@ -169,7 +169,13 @@ mod tests {
     fn service_ports_fall_back_without_replacing_foreign_listener_or_fixed_port() {
         let d = tempfile::tempdir().unwrap();
         let store = Store::open(&d.path().join("db")).unwrap();
-        for owner in ["caddy-admin", "php:8.4", "site:demo:web", "mailpit:web"] {
+        for owner in [
+            "caddy-admin",
+            "php:8.4",
+            "site:demo:web",
+            "web:site-id",
+            "mailpit:web",
+        ] {
             let foreign = TcpListener::bind(("127.0.0.1", 0)).unwrap();
             let busy = foreign.local_addr().unwrap().port();
             store
